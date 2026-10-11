@@ -270,11 +270,12 @@ function SyncFooter({ status, backup, onClick }: { status: SyncStatus | null; ba
 }
 
 export function syncFooterView(t: ReturnType<typeof useT>, s: SyncStatus | null, backup?: ICloudBackupStatus | null) {
-  if (backup?.enabled)
-    return {
-      icon: "cloud", color: "var(--accent)", title: t("backup.footer.enabled"),
-      sub: t(backup.automatic ? "backup.auto" : "backup.footer.manual"), spin: false,
-    };
+  if (backup?.enabled) {
+    const sub = t("backup.footer.synced_sub", { time: backup.last_at ? formatRelative(t.locale, backup.last_at) : t("time.never") });
+    if (backup.error || ["error", "timeout"].includes(backup.entries[0]?.transfer ?? ""))
+      return { icon: "cloud-warning", color: "var(--red)", title: t("sync.footer.error"), sub, spin: false };
+    return { icon: "cloud-check", color: "var(--green)", title: t("sync.footer.synced"), sub, spin: false };
+  }
   if (!s || s.kind === "none")
     return { icon: "cloud", color: "var(--fg2)", title: t("sync.footer.none"), sub: t("sync.footer.none_sub"), spin: false };
   switch (s.state) {

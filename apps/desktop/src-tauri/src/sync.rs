@@ -348,6 +348,7 @@ pub fn local_change(app: &AppHandle) {
 }
 
 pub fn trigger(app: &AppHandle, trigger: Trigger) {
+    crate::backup::trigger(app, trigger);
     let st = state(app);
     {
         let mut inner = st.sync.inner();

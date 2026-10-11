@@ -70,6 +70,7 @@ export function createMockApi(): HatobaApi {
   const q = new URLSearchParams(location.search);
   let backupEnabled = false;
   let backupAutomatic = false;
+  let backupRetention = 5;
   const backupEntries: ICloudBackupEntry[] = [];
   const platformParam = q.get("platform");
   const platform = platformParam === "macos" || platformParam === "linux" || platformParam === "windows" ? platformParam : "windows";
@@ -149,12 +150,12 @@ export function createMockApi(): HatobaApi {
 
   const backupChecks = new Map<string, number>();
   function backupStatus(retry = false) {
-    return { enabled: backupEnabled, automatic: backupAutomatic, last_at: backupEntries[0]?.created_at ?? null, error: null,
+    return { enabled: backupEnabled, automatic: backupAutomatic, retention: backupRetention, last_at: backupEntries[0]?.created_at ?? null, error: null,
       entries: backupEntries.map((entry) => {
         if (entry.transfer === "uploaded") return { ...entry };
-        const checks = retry ? 1 : Math.min(10, (backupChecks.get(entry.name) ?? 0) + 1);
+        const checks = retry ? 1 : Math.min(5, (backupChecks.get(entry.name) ?? 0) + 1);
         backupChecks.set(entry.name, checks);
-        return { ...entry, transfer: checks === 10 ? entry.transfer === "error" ? "error" : "timeout"
+        return { ...entry, transfer: checks === 5 ? entry.transfer === "error" ? "error" : "timeout"
           : entry.transfer === "error" ? "pending" : entry.transfer };
       }),
     };
@@ -309,12 +310,18 @@ export function createMockApi(): HatobaApi {
       vaultState = "unlocked";
     },
     icloud_backup_status: async (retry = false) => backupStatus(retry),
-    icloud_backup_configure: async (enabled, automatic) => { backupEnabled = enabled; backupAutomatic = automatic; },
+    icloud_backup_configure: async (enabled, automatic, retention) => {
+      if (retention !== undefined && (!Number.isInteger(retention) || retention < 1 || retention > 4294967295)) fail("invalid_input");
+      backupEnabled = enabled; backupAutomatic = automatic;
+      if (retention !== undefined) backupRetention = retention;
+      if (enabled) backupEntries.splice(backupRetention);
+    },
     icloud_backup_now: async () => {
       if (!backupEnabled) fail("invalid_input");
       await delay(300);
       const at = Date.now();
       backupEntries.unshift({ name: `hatoba-demo-${at}.hatoba-backup`, created_at: at, size: 48320, transfer: "pending" });
+      backupEntries.splice(backupRetention);
       return backupStatus();
     },
     icloud_backup_restore: async (_path, password, replace, currentPassword) => {

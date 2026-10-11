@@ -2006,13 +2006,14 @@ pub struct ICloudBackupEntry {
     pub name: String,
     pub created_at: i64,
     pub size: u64,
-    /// uploading, uploaded, pending, error, timeout (ten checks without confirmation), or unknown.
+    /// uploading, uploaded, pending, error, timeout (five checks without confirmation), or unknown.
     pub transfer: String,
 }
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct ICloudBackupStatus {
     pub enabled: bool,
     pub automatic: bool,
+    pub retention: u32,
     pub last_at: Option<i64>,
     pub entries: Vec<ICloudBackupEntry>,
     pub error: Option<String>,

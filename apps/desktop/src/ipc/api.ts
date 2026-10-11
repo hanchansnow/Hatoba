@@ -112,7 +112,7 @@ export interface HatobaApi {
   /** VAULT-07: write an encrypted backup to `path` (chosen with the save dialog). */
   vault_export_backup(path: string): Promise<void>;
   icloud_backup_status(retry?: boolean): Promise<ICloudBackupStatus>;
-  icloud_backup_configure(enabled: boolean, automatic: boolean): Promise<void>;
+  icloud_backup_configure(enabled: boolean, automatic: boolean, retention?: number): Promise<void>;
   icloud_backup_now(): Promise<ICloudBackupStatus>;
   icloud_backup_restore(path: string, password: string, replace: boolean, currentPassword: string | null): Promise<string | null>;
   show_backup_in_finder(path: string): Promise<void>;

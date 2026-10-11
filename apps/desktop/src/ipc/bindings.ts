@@ -10,7 +10,7 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 export const commands = {
 	icloudBackupStatus: (retry: boolean | null) => __TAURI_INVOKE<ICloudBackupStatus>("icloud_backup_status", { retry }),
 	showBackupInFinder: (path: string) => __TAURI_INVOKE<null>("show_backup_in_finder", { path }),
-	icloudBackupConfigure: (enabled: boolean, automatic: boolean) => __TAURI_INVOKE<null>("icloud_backup_configure", { enabled, automatic }),
+	icloudBackupConfigure: (enabled: boolean, automatic: boolean, retention: number | null) => __TAURI_INVOKE<null>("icloud_backup_configure", { enabled, automatic, retention }),
 	icloudBackupNow: () => __TAURI_INVOKE<ICloudBackupStatus>("icloud_backup_now"),
 	icloudBackupRestore: (path: string, password: string, replace: boolean, currentPassword: string | null) => __TAURI_INVOKE<string | null>("icloud_backup_restore", { path, password, replace, currentPassword }),
 	appInfo: () => __TAURI_INVOKE<AppInfo>("app_info"),
@@ -1115,13 +1115,14 @@ export type ICloudBackupEntry = {
 	name: string,
 	created_at: number,
 	size: number,
-	/**  uploading, uploaded, pending, error, timeout (ten checks without confirmation), or unknown. */
+	/**  uploading, uploaded, pending, error, timeout (five checks without confirmation), or unknown. */
 	transfer: string,
 };
 
 export type ICloudBackupStatus = {
 	enabled: boolean,
 	automatic: boolean,
+	retention: number,
 	last_at: number | null,
 	entries: ICloudBackupEntry[],
 	error: string | null,

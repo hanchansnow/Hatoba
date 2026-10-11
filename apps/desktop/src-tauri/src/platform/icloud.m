@@ -51,6 +51,15 @@ char *hatoba_icloud(const char *input) {
                 }
             }
             if (!result) result = error ? @{ @"error": @"Unable to download the iCloud backup." } : @{ @"ok": @YES };
+        } else if ([operation isEqual:@"remove"]) {
+            NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+            NSError *coordination = nil;
+            __block NSError *io = nil;
+            [coordinator coordinateWritingItemAtURL:url options:NSFileCoordinatorWritingForDeleting
+                error:&coordination byAccessor:^(NSURL *target) {
+                    [fm removeItemAtURL:target error:&io];
+                }];
+            result = (coordination || io) ? @{ @"error": @"Unable to remove an older backup." } : @{ @"ok": @YES };
         } else if ([operation isEqual:@"publish"] || [operation isEqual:@"read"]) {
             NSURL *other = [NSURL fileURLWithPath:request[@"other"] ?: @""];
             NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];

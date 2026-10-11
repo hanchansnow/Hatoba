@@ -29,7 +29,7 @@ export function createTauriApi(): HatobaApi {
     vault_recover: (recoveryCode, newPassword) => call("vault_recover", { recoveryCode, newPassword }),
     vault_restore_from_cloud: (config, password) => call("vault_restore_from_cloud", { config, password }),
     icloud_backup_status: (retry = false) => call("icloud_backup_status", { retry }),
-    icloud_backup_configure: (enabled, automatic) => call("icloud_backup_configure", { enabled, automatic }),
+    icloud_backup_configure: (enabled, automatic, retention) => call("icloud_backup_configure", { enabled, automatic, retention: retention ?? null }),
     icloud_backup_now: () => call("icloud_backup_now"),
     icloud_backup_restore: (path, password, replace, currentPassword) => call("icloud_backup_restore", { path, password, replace, currentPassword }),
     show_backup_in_finder: (path) => call("show_backup_in_finder", { path }),

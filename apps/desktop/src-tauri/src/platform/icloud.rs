@@ -75,6 +75,9 @@ pub fn inspect(path: &Path) -> AppResult<CloudState> {
 pub fn publish(source: &Path, target: &Path) -> AppResult<()> {
     call("publish", target, Some(source)).map(|_| ())
 }
+pub fn remove(path: &Path) -> AppResult<()> {
+    call("remove", path, None).map(|_| ())
+}
 pub fn read(source: &Path, target: &Path) -> AppResult<()> {
     call("download", source, None)?;
     let metadata = std::fs::metadata(source)?;

@@ -29,6 +29,8 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const [checked, setChecked] = useState(0);
   const [active, setActive] = useState(() => !document.hidden && document.hasFocus());
+  const [retention, setRetention] = useState("5");
+  const retentionDirty = useRef(false);
   const failures = useRef(0);
   const mounted = useRef(false);
   const request = useRef(0);
@@ -38,21 +40,22 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
   const showStatus = useCallback((next: ICloudBackupStatus) => {
     failures.current = next.error ? failures.current + 1 : 0;
     setStatus(next);
+    if (!retentionDirty.current) setRetention(String(next.retention));
     useApp.getState().setICloudBackup(next);
-    setRefreshError(failures.current >= 10 ? translate(locale, "backup.checkFailed") : null);
+    setRefreshError(failures.current >= 5 ? translate(locale, "backup.checkFailed") : null);
   }, [locale]);
-  const load = useCallback(async (retry = false) => {
+  const load = useCallback(async (retry = false, interactive = false) => {
     const id = ++request.current;
     if (retry) failures.current = 0;
     inFlight.current++;
-    setRefreshing(true);
+    if (interactive) setRefreshing(true);
     try {
       const next = await api.icloud_backup_status(retry);
       if (mounted.current && id === request.current) showStatus(next);
     } catch (e) {
       if (mounted.current && id === request.current) {
         failures.current++;
-        setRefreshError(failures.current >= 10 ? translate(locale, "backup.checkFailed")
+        setRefreshError(failures.current >= 5 ? translate(locale, "backup.checkFailed")
           : errorMessage((key, params) => translate(locale, key, params), e));
       }
     } finally {
@@ -71,9 +74,11 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     // Automatic backup results notify the open page without an idle polling loop.
-    void api.listen("backup://changed", () => {
+    void api.listen("backup://changed", (next) => {
       if (!foreground) return;
-      pending.current = true;
+      request.current++; // Discard a query started before the new snapshot was published.
+      setRefreshing(false);
+      showStatus(next);
       setChecked((value) => value + 1);
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
     const update = () => {
@@ -93,13 +98,13 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
       window.removeEventListener("focus", update);
       window.removeEventListener("blur", update);
     };
-  }, [load]);
+  }, [load, showStatus]);
   useEffect(() => {
     const waiting = status?.entries.some((entry) => !["uploaded", "error", "timeout"].includes(entry.transfer));
     if (!active || busy || refreshing || inFlight.current > 0) return;
     if (pending.current) { pending.current = false; void load(); return; }
-    if (failures.current >= 10 || (!waiting && !refreshError && !status?.error)) return;
-    // The backend caps each file at ten checks; terminal entries never trigger another timer.
+    if (failures.current >= 5 || (!waiting && !refreshError && !status?.error)) return;
+    // The backend caps each file at five checks; terminal entries never trigger another timer.
     const timer = window.setTimeout(() => {
       if (!document.hidden && document.hasFocus() && inFlight.current === 0) void load();
     }, 2_000);
@@ -108,7 +113,7 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
   const perform = async (action: () => Promise<ICloudBackupStatus | void>, backup = false) => {
     // Ignore an older query that finishes while a new backup is being saved.
     request.current++; setRefreshing(false);
-    setBusy(true); setSaving(backup); setError(null); setRefreshError(null);
+    setBusy(true); setSaving(backup); setError(null); setRefreshError(null); failures.current = 0;
     setStatus((previous) => previous ? { ...previous, error: null } : previous);
     try {
       const next = await action();
@@ -129,12 +134,26 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
       <Row label={t("backup.auto")}><Switch label={t("backup.auto")} checked={status?.automatic ?? false}
         disabled={busy || !status?.enabled}
         onChange={(automatic) => void perform(() => api.icloud_backup_configure(status?.enabled ?? false, automatic))} /></Row>
+      <Row label={t("backup.retention")}><div className={s.retention}>
+        <TextField aria-label={t("backup.retention")} type="number" min={1} max={4294967295} step={1}
+          value={retention} disabled={busy || !status?.enabled}
+          onChange={(e) => { retentionDirty.current = true; setRetention(e.target.value); }}
+          onBlur={() => {
+            if (!retentionDirty.current || !status) return;
+            const count = Number(retention);
+            if (!Number.isInteger(count) || count < 1 || count > 4294967295) { setError(t("backup.retentionInvalid")); return; }
+            retentionDirty.current = false; setError(null);
+            if (count === status.retention) return;
+            void perform(() => api.icloud_backup_configure(status.enabled, status.automatic, count));
+          }}
+          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+      </div></Row>
     </Group>
     <div className={s.actions}>
       <Button variant="primary" icon="cloud-arrow-up" busy={busy} disabled={!status?.enabled} onClick={() => void perform(async () => {
         const next = await api.icloud_backup_now(); toast(t("backup.saved"), "success"); return next;
       }, true)}>{t(saving ? "backup.saving" : "backup.now")}</Button>
-      <Button icon="arrows-clockwise" busy={refreshing} disabled={busy} onClick={() => void load(true)}>{t("backup.refresh")}</Button>
+      <Button icon="arrows-clockwise" busy={refreshing} disabled={busy} onClick={() => void load(true, true)}>{t("backup.refresh")}</Button>
       <Button icon="folder-open" disabled={busy} onClick={() => void perform(async () => {
         const file = await chooseBackupFile();
         if (file) setRestore(file);

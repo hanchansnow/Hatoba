@@ -2,8 +2,10 @@
 use crate::dto::{ICloudBackupEntry, ICloudBackupStatus};
 use crate::error::{AppError, AppResult};
 use crate::platform::icloud;
-use crate::state::{AppState, blocking, now_ms};
+use crate::state::{AppState, blocking};
+use crate::sync::Trigger;
 use hatoba_core::backup::{BackupFile, read_backup, write_backup};
+use hatoba_core::sync::Backoff;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -12,16 +14,20 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 const CONFIG_KEY: &str = "icloud_backup";
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+fn default_retention() -> u32 {
+    5
+}
 
 #[derive(Default)]
 pub struct Backups {
     pub gate: tokio::sync::Mutex<()>,
     error: Mutex<Option<String>>,
     files: Mutex<HashMap<PathBuf, FileStatus>>,
+    wake: tokio::sync::Notify,
+    pending: Mutex<Option<Trigger>>,
 }
 
-const MAX_CHECKS: u8 = 10;
+const MAX_CHECKS: u8 = 5;
 
 struct FileStatus {
     metadata: std::fs::Metadata,
@@ -65,14 +71,26 @@ impl FileStatus {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Config {
     enabled: bool,
     automatic: bool,
     last_at: Option<i64>,
-    last_checked: Option<i64>,
+    retention: u32,
     last_digest: Option<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            automatic: false,
+            retention: default_retention(),
+            last_at: None,
+            last_digest: None,
+        }
+    }
 }
 
 fn config(state: &AppState) -> AppResult<Config> {
@@ -100,8 +118,12 @@ fn parse_config(mut value: serde_json::Value) -> AppResult<Config> {
             object.insert("enabled".into(), enabled.into());
         }
     }
-    serde_json::from_value(value)
-        .map_err(|_| AppError::invalid("backup", "Invalid backup preferences"))
+    let mut cfg: Config = serde_json::from_value(value)
+        .map_err(|_| AppError::invalid("backup", "Invalid backup preferences"))?;
+    if cfg.retention == 0 {
+        cfg.retention = default_retention();
+    }
+    Ok(cfg)
 }
 fn save_config(state: &AppState, cfg: &Config) -> AppResult<()> {
     let mut vault = state.vault();
@@ -127,25 +149,45 @@ fn filename(device: &str, at: i64) -> String {
     )
 }
 fn file_time(name: &str) -> Option<i64> {
-    if !name.ends_with(".hatoba-backup") || !name.starts_with("hatoba-") {
+    let body = name
+        .strip_prefix("hatoba-")?
+        .strip_suffix(".hatoba-backup")?;
+    let mut fields = body.splitn(3, '-');
+    chrono::NaiveDateTime::parse_from_str(fields.next()?, "%Y%m%dT%H%M%S").ok()?;
+    let at = fields.next()?.parse().ok()?;
+    let ids = fields.next()?;
+    if !ids.is_ascii() || ids.len() != 73 || ids.as_bytes()[36] != b'-' {
         return None;
     }
-    name.split('-').nth(2)?.parse().ok()
+    uuid::Uuid::parse_str(&ids[..36]).ok()?;
+    uuid::Uuid::parse_str(&ids[37..]).ok()?;
+    Some(at)
 }
 
-pub fn configure(state: &AppState, enabled: bool, automatic: bool) -> AppResult<()> {
+pub fn configure(
+    state: &AppState,
+    enabled: bool,
+    automatic: bool,
+    retention: Option<u32>,
+) -> AppResult<()> {
     if !cfg!(target_os = "macos") {
         return Err(AppError::invalid("platform", "macOS only"));
     }
     let old = config(state)?;
+    let retention = retention.unwrap_or(old.retention);
+    if retention == 0 {
+        return Err(AppError::invalid("retention", "Keep at least one snapshot"));
+    }
     if enabled {
-        icloud::backup_directory(true)?;
+        let root = icloud::backup_directory(true)?;
+        prune(&root, retention, None)?;
     }
     save_config(
         state,
         &Config {
             enabled,
             automatic,
+            retention,
             ..old
         },
     )?;
@@ -235,7 +277,9 @@ pub fn status(state: &AppState, retry: bool) -> AppResult<ICloudBackupStatus> {
             }
         }
     }
-    cached.retain(|path, _| present.contains(path));
+    if directory_error.is_none() {
+        cached.retain(|path, _| present.contains(path));
+    }
     entries.sort_by(|a, b| {
         b.created_at
             .cmp(&a.created_at)
@@ -244,6 +288,7 @@ pub fn status(state: &AppState, retry: bool) -> AppResult<ICloudBackupStatus> {
     Ok(ICloudBackupStatus {
         enabled: cfg.enabled,
         automatic: cfg.automatic,
+        retention: cfg.retention,
         last_at: cfg.last_at,
         entries,
         error: directory_error,
@@ -305,13 +350,31 @@ fn fingerprint(file: &mut BackupFile) -> AppResult<String> {
         .collect())
 }
 
-fn automatic_due(cfg: &Config, at: i64) -> bool {
-    cfg.automatic
-        && cfg.enabled
-        && cfg
-            .last_checked
-            .or(cfg.last_at)
-            .is_none_or(|checked| at.saturating_sub(checked) >= DAY_MS)
+// Only app snapshots participate in retention; restore safety files live elsewhere.
+fn prune(root: &Path, retention: u32, keep: Option<&Path>) -> AppResult<()> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(at) = file_time(&name) else {
+            continue;
+        };
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.is_file() && !metadata.file_type().is_symlink() {
+            files.push((at, entry.path()));
+        }
+    }
+    // Keep the newly published file even if the device clock moved backwards.
+    files.sort_by(|a, b| {
+        (Some(b.1.as_path()) == keep)
+            .cmp(&(Some(a.1.as_path()) == keep))
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.1.cmp(&a.1))
+    });
+    for (_, path) in files.into_iter().skip(retention as usize) {
+        icloud::remove(&path)?;
+    }
+    Ok(())
 }
 
 pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
@@ -325,7 +388,7 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
         state.backups.gate.lock().await
     };
     let cfg = config(&state)?;
-    if automatic && !automatic_due(&cfg, now_ms()) {
+    if automatic && !(cfg.enabled && cfg.automatic) {
         return Ok(());
     }
     if !cfg.enabled {
@@ -353,7 +416,9 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
         write_backup(&file, &temporary.0)?;
         // Structural validation of the bytes written before publishing an immutable snapshot.
         read_backup(&temporary.0)?;
-        icloud::publish(&temporary.0, &root.join(filename(&device, file.created_at)))?;
+        let target = root.join(filename(&device, file.created_at));
+        icloud::publish(&temporary.0, &target)?;
+        prune(&root, cfg.retention, Some(&target))?;
         Ok(Some((digest, file.created_at)))
     })
     .await;
@@ -361,7 +426,6 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
         Ok(Some((digest, at))) => {
             let mut cfg = config(&state)?;
             cfg.last_at = Some(at);
-            cfg.last_checked = Some(at);
             cfg.last_digest = Some(digest);
             save_config(&state, &cfg)?;
             *state
@@ -370,15 +434,11 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = None;
             if automatic {
-                let _ = app.emit("backup://changed", ());
+                emit_status(&app).await;
             }
             Ok(())
         }
-        Ok(None) => {
-            let mut cfg = config(&state)?;
-            cfg.last_checked = Some(now_ms());
-            save_config(&state, &cfg)
-        }
+        Ok(None) => Ok(()),
         Err(error) => {
             *state
                 .backups
@@ -386,11 +446,34 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(error.detail.clone());
             if automatic {
-                let _ = app.emit("backup://changed", ());
+                emit_status(&app).await;
             }
             Err(error)
         }
     }
+}
+
+async fn emit_status(app: &AppHandle) {
+    let handle = app.clone();
+    if let Ok(status) = blocking(move || status(&handle.state::<AppState>(), false)).await {
+        let _ = app.emit("backup://changed", status);
+    }
+}
+
+pub fn trigger(app: &AppHandle, trigger: Trigger) {
+    if !cfg!(target_os = "macos") || trigger == Trigger::Manual {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let mut pending = state
+        .backups
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if pending.is_none() || trigger != Trigger::LocalChange {
+        *pending = Some(trigger);
+    }
+    state.backups.wake.notify_one();
 }
 
 pub fn spawn_scheduler(app: AppHandle) {
@@ -398,9 +481,40 @@ pub fn spawn_scheduler(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
+        let mut backoff = Backoff::default();
+        let mut retry_at: Option<tokio::time::Instant> = None;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let _ = run(app.clone(), true).await;
+            let state = app.state::<AppState>();
+            let interval = std::time::Duration::from_secs(60);
+            let wait = retry_at.map_or(interval, |at| {
+                at.saturating_duration_since(tokio::time::Instant::now())
+                    .min(interval)
+            });
+            let woke = tokio::time::timeout(wait, state.backups.wake.notified())
+                .await
+                .is_ok();
+            let trigger = state
+                .backups
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if woke && trigger == Some(Trigger::LocalChange) {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                state
+                    .backups
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+            }
+            match run(app.clone(), true).await {
+                Ok(()) => {
+                    backoff.reset();
+                    retry_at = None;
+                }
+                Err(_) => retry_at = Some(tokio::time::Instant::now() + backoff.next_delay()),
+            }
         }
     });
 }

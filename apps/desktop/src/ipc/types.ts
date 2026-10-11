@@ -1257,7 +1257,7 @@ export interface WindowChromeEvent {
 }
 
 export interface EventMap {
-  "backup://changed": null;
+  "backup://changed": ICloudBackupStatus;
   "vault://locked": VaultLockedEvent;
   "sync://status": SyncStatus;
   "ssh://hostkey-prompt": HostKeyPrompt;
@@ -1279,6 +1279,7 @@ export interface ICloudBackupEntry {
 export interface ICloudBackupStatus {
   enabled: boolean;
   automatic: boolean;
+  retention: number;
   last_at: number | null;
   entries: ICloudBackupEntry[];
   error: string | null;

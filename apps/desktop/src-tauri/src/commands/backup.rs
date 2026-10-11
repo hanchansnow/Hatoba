@@ -24,11 +24,16 @@ pub async fn icloud_backup_configure(
     app: AppHandle,
     enabled: bool,
     automatic: bool,
+    retention: Option<u32>,
 ) -> AppResult<()> {
     let state = app.state::<AppState>();
     let _gate = state.backups.gate.lock().await;
     let handle = app.clone();
-    blocking(move || backup::configure(&handle.state::<AppState>(), enabled, automatic)).await
+    blocking(move || backup::configure(&handle.state::<AppState>(), enabled, automatic, retention))
+        .await?;
+    drop(_gate);
+    backup::trigger(&app, crate::sync::Trigger::Unlock);
+    Ok(())
 }
 #[tauri::command]
 #[specta::specta]

@@ -203,6 +203,7 @@ function useGlobalEvents() {
         useApp.getState().openSettings(false);
         void useApp.getState().refreshVault();
       }),
+      api.listen("backup://changed", (status) => useApp.getState().setICloudBackup(status)),
       api.listen("sync://status", (status) => {
         useApp.getState().setSync(status);
         // Pulls may have changed hosts/keys; refresh what the UI shows.
