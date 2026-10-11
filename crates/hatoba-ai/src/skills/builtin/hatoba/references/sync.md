@@ -129,3 +129,9 @@ At the bottom of the status page:
 
 - **Generate New Recovery Code** and **Change Master Password** work like their Settings → Security counterparts. After a password change, the other devices are signed out and must sign in with the new one.
 - **Disconnect…** stops syncing on this device. Data stays on the device and nothing is deleted from the cloud. You can reconnect through the wizard later.
+
+## macOS iCloud Backup
+
+On macOS, the existing Method step also offers **iCloud Backup**. Select it and continue; **Back** returns to Method. A connected vault offers **Manage Backups**. Turn on **Enable iCloud Backup** to save encrypted snapshots directly in `iCloud Drive/Hatoba/`. The location is fixed; there is no folder picker or `Backups` subfolder. **Daily automatic backup** is a separate switch. Turning off iCloud Backup stops manual and automatic publication and keeps existing files available for restoration.
+
+Manual backup creates a new snapshot. Daily backups run while the app is running and unlocked, skipping unchanged content. Both use the existing encrypted backup format: sensitive vault items stay encrypted, and restoration requires the master password used at backup time. History distinguishes locally saved files from confirmed iCloud uploads. Replacing a vault also requires its current password and explicit confirmation; a local encrypted safety snapshot is saved first, then sessions and cloud sync are closed. First launch offers backup-file restoration. Remote files and OS keychain credentials are excluded.

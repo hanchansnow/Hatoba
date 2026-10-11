@@ -2,6 +2,7 @@
 //! crypto, sync) and `hatoba-ssh` (sessions, SFTP). The WebView never receives secrets (spec §3.2).
 
 mod ai;
+mod backup;
 mod commands;
 mod convert;
 mod deploy;
@@ -18,8 +19,9 @@ mod sync;
 mod update;
 
 use commands::{
-    ai as ai_cmd, app, deploy as deploy_cmd, forwards, hosts, keys, mcp as mcp_cmd, proxies, quick,
-    settings, sftp, skills, ssh as ssh_cmd, sync as sync_cmd, vault,
+    ai as ai_cmd, app, backup as backup_cmd, deploy as deploy_cmd, forwards, hosts, keys,
+    mcp as mcp_cmd, proxies, quick, settings, sftp, skills, ssh as ssh_cmd, sync as sync_cmd,
+    vault,
 };
 use tauri::Manager;
 use tauri_specta::{collect_commands, collect_events};
@@ -31,6 +33,11 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         // i64 timestamps (Unix ms) and u64 sizes stay far below 2^53.
         .dangerously_cast_bigints_to_number()
         .commands(collect_commands![
+            backup_cmd::icloud_backup_status,
+            backup_cmd::show_backup_in_finder,
+            backup_cmd::icloud_backup_configure,
+            backup_cmd::icloud_backup_now,
+            backup_cmd::icloud_backup_restore,
             app::app_info,
             app::window_snap_overlay,
             app::window_floating,
@@ -231,6 +238,7 @@ pub fn run() {
 
             lock::spawn_watchers(handle.clone());
             sync::spawn_scheduler(handle.clone());
+            backup::spawn_scheduler(handle.clone());
             platform::window::show_main(&handle);
             Ok(())
         })

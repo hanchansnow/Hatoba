@@ -15,7 +15,7 @@ use crate::state::{AppState, blocking};
 use crate::{lock, sync};
 
 /// Common work after any successful unlock (password, recovery code, biometrics, restore).
-fn after_unlock(app: &AppHandle, state: &AppState) {
+pub(crate) fn after_unlock(app: &AppHandle, state: &AppState) {
     // Only when sync is off; otherwise `sync::run_round` does it after pulling.
     if let Err(e) = state.with_unlocked(adopt_legacy_prefs_after_unlock) {
         tracing::warn!(

@@ -4,7 +4,7 @@ import { Dialog, Menu, confirm, toast, useMenu } from "@/components/overlay";
 import { openExternal } from "@/features/sync/external";
 import { formatRelative, useT } from "@/i18n";
 import { api } from "@/ipc/api";
-import type { GroupView, SyncStatus } from "@/ipc/types";
+import type { GroupView, ICloudBackupStatus, SyncStatus } from "@/ipc/types";
 import { cx } from "@/lib/cx";
 import { REPO_URL, bugReportUrl } from "@/lib/github";
 import { tagColor } from "@/lib/tags";
@@ -37,7 +37,7 @@ function pageKey(page: Page): Key | null {
 
 export function Sidebar() {
   const t = useT();
-  const { page, navigate, info, sync, lock, openSettings } = useApp();
+  const { page, navigate, info, sync, icloudBackup, lock, openSettings } = useApp();
   const updateAvailable = useUpdate(selectUpdateAvailable);
   const settingsLabel = updateAvailable ? t("sidebar.settingsUpdate") : t("sidebar.settings");
   const activateHome = () => useTabs.getState().activate("home");
@@ -151,7 +151,7 @@ export function Sidebar() {
 
       <StarPrompt />
       <div className={st.footer}>
-        <SyncFooter status={sync} onClick={() => go({ kind: "sync" })} />
+        <SyncFooter status={sync} backup={info.platform === "macos" ? icloudBackup : null} onClick={() => go({ kind: "sync" })} />
         <button type="button" className={st.footerButton} title={t("sidebar.lock")} aria-label={t("sidebar.lock")} onClick={() => void lock()}>
           <Icon name="lock-simple" />
         </button>
@@ -255,9 +255,9 @@ function StarPrompt() {
   );
 }
 
-function SyncFooter({ status, onClick }: { status: SyncStatus | null; onClick: () => void }) {
+function SyncFooter({ status, backup, onClick }: { status: SyncStatus | null; backup: ICloudBackupStatus | null; onClick: () => void }) {
   const t = useT();
-  const view = syncFooterView(t, status);
+  const view = syncFooterView(t, status, backup);
   return (
     <button type="button" className={st.syncButton} onClick={onClick}>
       <Icon name={view.icon} className={cx(st.syncIcon, view.spin && st.spin)} color={view.color} />
@@ -269,7 +269,12 @@ function SyncFooter({ status, onClick }: { status: SyncStatus | null; onClick: (
   );
 }
 
-export function syncFooterView(t: ReturnType<typeof useT>, s: SyncStatus | null) {
+export function syncFooterView(t: ReturnType<typeof useT>, s: SyncStatus | null, backup?: ICloudBackupStatus | null) {
+  if (backup?.enabled)
+    return {
+      icon: "cloud", color: "var(--accent)", title: t("backup.footer.enabled"),
+      sub: t(backup.automatic ? "backup.auto" : "backup.footer.manual"), spin: false,
+    };
   if (!s || s.kind === "none")
     return { icon: "cloud", color: "var(--fg2)", title: t("sync.footer.none"), sub: t("sync.footer.none_sub"), spin: false };
   switch (s.state) {

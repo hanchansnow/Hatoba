@@ -7,6 +7,7 @@ import { MethodStep } from "./MethodStep";
 import { PasswordStep } from "./PasswordStep";
 import { EMPTY_D1, EMPTY_DEPLOY, EMPTY_WORKER, type D1Form, type Method, type WorkerForm } from "./wizardTypes";
 import { WorkerStep } from "./WorkerStep";
+import { ICloudBackup } from "./ICloudBackup";
 
 /** What step 3 initialises: a Worker or D1 database the user connected, or the Worker the app deployed. */
 type Remote = { kind: "config"; config: SyncConfigInput } | { kind: "deployed"; handle: string };
@@ -38,6 +39,7 @@ export function SyncWizard() {
     return <PasswordStep submit={submit} onBack={() => setStep(2)} />;
   }
   if (step === 2) {
+    if (method === "icloud") return <ICloudBackup onBack={() => setStep(1)} />;
     if (method === "d1") {
       const next = (config: SyncConfigInput) => {
         setRemote({ kind: "config", config });

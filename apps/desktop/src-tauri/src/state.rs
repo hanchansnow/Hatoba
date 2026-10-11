@@ -22,6 +22,7 @@ pub use hatoba_core::sync::SharedVault;
 
 pub struct AppState {
     pub vault: SharedVault,
+    pub backups: crate::backup::Backups,
     pub secrets: Arc<KeyringStore>,
     pub ssh: SshManager,
     pub sync: SyncController,
@@ -45,6 +46,7 @@ impl AppState {
         let mcp = McpManager::default();
         Self {
             vault: Arc::new(Mutex::new(vault)),
+            backups: crate::backup::Backups::default(),
             secrets: Arc::new(KeyringStore),
             ssh: SshManager::default(),
             sync: SyncController::default(),

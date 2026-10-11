@@ -6,6 +6,7 @@ import type {
   ForwardView,
   GroupView,
   HostView,
+  ICloudBackupEntry,
   KeyView,
   LocalPrefs,
   ProxyView,
@@ -67,6 +68,9 @@ const SSH_DEMO_DETAIL: Partial<Record<SshErrorKind, (address: string, port: numb
  */
 export function createMockApi(): HatobaApi {
   const q = new URLSearchParams(location.search);
+  let backupEnabled = false;
+  let backupAutomatic = false;
+  const backupEntries: ICloudBackupEntry[] = [];
   const platformParam = q.get("platform");
   const platform = platformParam === "macos" || platformParam === "linux" || platformParam === "windows" ? platformParam : "windows";
   const demo = q.get("state");
@@ -141,6 +145,19 @@ export function createMockApi(): HatobaApi {
     } catch {
       return { ...D.PREFS };
     }
+  }
+
+  const backupChecks = new Map<string, number>();
+  function backupStatus(retry = false) {
+    return { enabled: backupEnabled, automatic: backupAutomatic, last_at: backupEntries[0]?.created_at ?? null, error: null,
+      entries: backupEntries.map((entry) => {
+        if (entry.transfer === "uploaded") return { ...entry };
+        const checks = retry ? 1 : Math.min(10, (backupChecks.get(entry.name) ?? 0) + 1);
+        backupChecks.set(entry.name, checks);
+        return { ...entry, transfer: checks === 10 ? entry.transfer === "error" ? "error" : "timeout"
+          : entry.transfer === "error" ? "pending" : entry.transfer };
+      }),
+    };
   }
 
   function emit<K extends keyof EventMap>(event: K, payload: EventMap[K]) {
@@ -291,6 +308,22 @@ export function createMockApi(): HatobaApi {
       sync = D.syncStatus();
       vaultState = "unlocked";
     },
+    icloud_backup_status: async (retry = false) => backupStatus(retry),
+    icloud_backup_configure: async (enabled, automatic) => { backupEnabled = enabled; backupAutomatic = automatic; },
+    icloud_backup_now: async () => {
+      if (!backupEnabled) fail("invalid_input");
+      await delay(300);
+      const at = Date.now();
+      backupEntries.unshift({ name: `hatoba-demo-${at}.hatoba-backup`, created_at: at, size: 48320, transfer: "pending" });
+      return backupStatus();
+    },
+    icloud_backup_restore: async (_path, password, replace, currentPassword) => {
+      await delay(600);
+      if (password.length < 4 || (replace && (!currentPassword || currentPassword.length < 4))) fail("wrong_password");
+      vaultState = "unlocked";
+      return replace ? "/Users/demo/Library/Application Support/app.hatoba.desktop/restore-safety/before-restore.hatoba" : null;
+    },
+    show_backup_in_finder: async () => {},
     vault_export_backup: async () => {
       await delay(300);
     },

@@ -10,7 +10,7 @@ const POINTS: { icon: string; key: MessageKey }[] = [
 ];
 
 /** "How is my data encrypted?" (spec §4: AES-256-GCM per item, vault key wrapped via Argon2id). */
-export function EncryptionDialog({ onClose }: { onClose: () => void }) {
+export function EncryptionDialog({ onClose, icloud = false }: { onClose: () => void; icloud?: boolean }) {
   const t = useT();
   return (
     <Dialog
@@ -27,7 +27,7 @@ export function EncryptionDialog({ onClose }: { onClose: () => void }) {
         {POINTS.map((p) => (
           <li key={p.key} className={s.point}>
             <Icon name={p.icon} className={s.pointIcon} />
-            <span>{t(p.key)}</span>
+            <span>{t(icloud && p.key === "sync.enc.cloud" ? "backup.encryption" : p.key)}</span>
           </li>
         ))}
       </ul>

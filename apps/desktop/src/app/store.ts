@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { api } from "@/ipc/api";
-import type { AppInfo, LocalPrefs, QuickTarget, SyncStatus, VaultStatus } from "@/ipc/types";
+import type { AppInfo, ICloudBackupStatus, LocalPrefs, QuickTarget, SyncStatus, VaultStatus } from "@/ipc/types";
 import { detectLocale, setLocale, type Locale } from "@/i18n";
 
 export type HostFilter =
@@ -50,6 +50,7 @@ interface AppState {
   prefs: LocalPrefs;
   vault: VaultStatus | null;
   sync: SyncStatus | null;
+  icloudBackup: ICloudBackupStatus | null;
   page: Page;
   sidebarCollapsed: boolean;
   settingsOpen: boolean;
@@ -62,6 +63,7 @@ interface AppState {
   setPrefs(prefs: LocalPrefs): Promise<void>;
   refreshVault(): Promise<VaultStatus>;
   setSync(status: SyncStatus): void;
+  setICloudBackup(status: ICloudBackupStatus): void;
   setPhase(phase: Phase): void;
   toggleSidebar(): void;
   openSettings(open: boolean, tab?: SettingsTab): void;
@@ -76,6 +78,7 @@ export const useApp = create<AppState>((set, get) => ({
   prefs: DEFAULT_PREFS,
   vault: null,
   sync: null,
+  icloudBackup: null,
   page: { kind: "hosts", filter: { kind: "all" } },
   sidebarCollapsed: false,
   settingsOpen: false,
@@ -94,6 +97,7 @@ export const useApp = create<AppState>((set, get) => ({
     return vault;
   },
   setSync: (sync) => set({ sync }),
+  setICloudBackup: (icloudBackup) => set({ icloudBackup }),
   setPhase: (phase) => set({ phase }),
   toggleSidebar: () => set({ sidebarCollapsed: !get().sidebarCollapsed }),
   openSettings: (settingsOpen, tab) => set({ settingsOpen, settingsTab: tab ?? null }),

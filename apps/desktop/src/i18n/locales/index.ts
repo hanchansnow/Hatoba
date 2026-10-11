@@ -1,3 +1,4 @@
+import backup from "./backup";
 import ai from "./ai";
 import aiSettings from "./aiSettings";
 import common from "./common";
@@ -8,12 +9,12 @@ import sync from "./sync";
 import terminal from "./terminal";
 import vault from "./vault";
 
-const tables = [common, hosts, terminal, keys, sync, vault, settings, ai, aiSettings];
+const tables = [backup, common, hosts, terminal, keys, sync, vault, settings, ai, aiSettings];
 
 export type Locale = "zh-CN" | "en" | "ja";
 
 type Zh<T extends { "zh-CN": object }> = T["zh-CN"];
-type AllZh = Zh<typeof common> &
+type AllZh = Zh<typeof backup> & Zh<typeof common> &
   Zh<typeof hosts> &
   Zh<typeof terminal> &
   Zh<typeof keys> &

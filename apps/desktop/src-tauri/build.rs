@@ -18,6 +18,9 @@ fn main() {
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
     }
 
+    if target_os == "macos" {
+        build_icloud_bridge();
+    }
     embed_worker_bundle();
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }
@@ -37,4 +40,55 @@ fn embed_worker_bundle() {
         .join("worker-bundle.json");
     let bundle = std::fs::read_to_string(dir.join("bundle.json")).unwrap_or_default();
     std::fs::write(out, bundle).expect("write worker-bundle.json");
+}
+
+fn build_icloud_bridge() {
+    use std::{path::PathBuf, process::Command};
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/platform/icloud.m");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let object = out.join("icloud.o");
+    let sdk = Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .expect("macOS SDK");
+    assert!(sdk.status.success(), "macOS SDK unavailable");
+    let sdk = String::from_utf8(sdk.stdout).expect("SDK path");
+    let target = std::env::var("TARGET").expect("TARGET");
+    let arch = if target.starts_with("aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    assert!(
+        Command::new("xcrun")
+            .args([
+                "clang",
+                "-fobjc-arc",
+                "-mmacosx-version-min=13.0",
+                "-arch",
+                arch,
+                "-isysroot",
+                sdk.trim(),
+                "-c"
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .expect("compile iCloud bridge")
+            .success()
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libhatoba_icloud.a"))
+            .arg(object)
+            .status()
+            .expect("archive iCloud bridge")
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=hatoba_icloud");
+    println!("cargo:rustc-link-lib=framework=Foundation");
 }

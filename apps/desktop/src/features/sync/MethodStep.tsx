@@ -8,9 +8,10 @@ import type { Method } from "./wizardTypes";
 import { WizardFrame, WizardTitle } from "./WizardFrame";
 import s from "./Wizard.module.css";
 
-/** Step 1: deploy the Worker from the app (recommended, spec §6.7), connect a deployed Worker, or D1 direct (spec §6.1). */
+/** Existing Cloudflare methods, plus iCloud encrypted backup on macOS. */
 export function MethodStep({ method, onChange, onNext }: { method: Method; onChange: (m: Method) => void; onNext: () => void }) {
   const t = useT();
+  const mac = useApp((st) => st.info.platform === "macos");
   const [explain, setExplain] = useState(false);
   const cancel = () => useApp.getState().navigate({ kind: "hosts", filter: { kind: "all" } });
 
@@ -19,6 +20,7 @@ export function MethodStep({ method, onChange, onNext }: { method: Method; onCha
     { value: "worker", title: t("sync.opt.worker"), desc: t("sync.opt.worker.desc"), icon: "plugs-connected" },
     { value: "d1", title: t("sync.opt.token"), desc: t("sync.opt.token.desc"), icon: "key" },
   ];
+  if (mac) options.push({ value: "icloud", title: t("backup.tab"), desc: t("backup.methodDescription"), icon: "cloud" });
 
   return (
     <>
@@ -38,7 +40,7 @@ export function MethodStep({ method, onChange, onNext }: { method: Method; onCha
           </>
         }
       >
-        <WizardTitle title={t("sync.w1.title")} body={t("sync.w1.body")} />
+        <WizardTitle title={t(mac ? "backup.methodTitle" : "sync.w1.title")} body={t(mac ? "backup.methodBody" : "sync.w1.body")} />
         <div className={s.options} role="radiogroup" aria-label={t("sync.step.method")}>
           {options.map((o) => (
             <button
@@ -64,7 +66,7 @@ export function MethodStep({ method, onChange, onNext }: { method: Method; onCha
           ))}
         </div>
       </WizardFrame>
-      {explain && <EncryptionDialog onClose={() => setExplain(false)} />}
+      {explain && <EncryptionDialog icloud={method === "icloud"} onClose={() => setExplain(false)} />}
     </>
   );
 }

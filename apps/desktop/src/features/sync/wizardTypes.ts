@@ -1,7 +1,7 @@
 import type { AppError, D1Database, DeployPlan, DeployStart, DeployStep, SyncTestResult } from "@/ipc/types";
 
-/** Deploy the Worker from the app (§6.7), connect a deployed Worker, or D1 direct mode (§6.1). */
-export type Method = "deploy" | "worker" | "d1";
+/** Three Cloudflare methods and a macOS-only encrypted iCloud backup option. */
+export type Method = "deploy" | "worker" | "d1" | "icloud";
 
 /** Progress of a connection test or token verification. */
 export type Probe =

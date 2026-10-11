@@ -2,6 +2,7 @@
 
 pub mod ai;
 pub mod app;
+pub mod backup;
 pub mod deploy;
 pub mod forwards;
 pub mod hosts;

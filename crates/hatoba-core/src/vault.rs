@@ -559,6 +559,14 @@ impl Vault {
         Ok(())
     }
 
+    pub(crate) fn install_backup_unlock(
+        &mut self,
+        vault_key: Key32,
+        items: BTreeMap<String, Item>,
+    ) {
+        self.unlocked = Some(Unlocked { vault_key, items });
+    }
+
     fn load_items(&self, key: &[u8; 32]) -> Result<BTreeMap<String, Item>> {
         let mut items = BTreeMap::new();
         for row in self.store.item_rows()? {

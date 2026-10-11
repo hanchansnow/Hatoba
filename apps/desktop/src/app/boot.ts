@@ -34,6 +34,13 @@ export async function enterUnlocked() {
   } catch {
     /* sync status is optional */
   }
+  if (useApp.getState().info.platform === "macos") {
+    try {
+      useApp.getState().setICloudBackup(await api.icloud_backup_status());
+    } catch {
+      /* backup status is optional */
+    }
+  }
   void useApp.getState().refreshVault();
   useApp.setState({ phase: "unlocked" });
 }

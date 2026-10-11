@@ -12,7 +12,8 @@
 //!
 //! Opening it needs the master password (or the recovery code through the same key blobs).
 
-use std::io::Write as _;
+use std::collections::{BTreeMap, HashSet};
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ use crate::crypto::{AAD_VAULT_KEY, KdfParams, MasterKeys, decode_salt, unwrap_ke
 use crate::error::{Error, Result};
 use crate::model::new_id;
 use crate::store::{ItemRow, Store, StoreOps, meta};
-use crate::vault::{Vault, seal_vault_check};
+use crate::vault::{Vault, decode_envelope, seal_vault_check};
 
 /// Value of the `format` field.
 pub const BACKUP_FORMAT: &str = "hatoba-backup";
@@ -45,6 +46,9 @@ pub struct BackupFile {
     pub protected_vault_key: String,
     /// Vault key wrapped by the recovery key.
     pub recovery_vault_key: String,
+    /// Recovery authentication material, still sealed with the vault key. Older backups omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_auth_sealed: Option<String>,
     /// Every item, tombstones included.
     pub items: Vec<BackupItem>,
 }
@@ -63,7 +67,7 @@ pub struct BackupItem {
 }
 
 /// Writes a backup of `store` to `path`, atomically (temp file + rename).
-pub(crate) fn export(store: &Store, path: &Path, now_ms: i64) -> Result<()> {
+fn snapshot(store: &Store, now_ms: i64) -> Result<BackupFile> {
     let get = |key: &str| store.get_meta(key)?.ok_or(Error::VaultNotInitialized);
     let file = BackupFile {
         format: BACKUP_FORMAT.to_owned(),
@@ -73,6 +77,7 @@ pub(crate) fn export(store: &Store, path: &Path, now_ms: i64) -> Result<()> {
         kdf_params: get(meta::KDF_PARAMS)?,
         protected_vault_key: get(meta::PROTECTED_VAULT_KEY)?,
         recovery_vault_key: get(meta::RECOVERY_VAULT_KEY)?,
+        recovery_auth_sealed: store.get_meta(meta::RECOVERY_AUTH_SEALED)?,
         items: store
             .item_rows()?
             .into_iter()
@@ -84,7 +89,12 @@ pub(crate) fn export(store: &Store, path: &Path, now_ms: i64) -> Result<()> {
             })
             .collect(),
     };
-    let json = serde_json::to_vec_pretty(&file)?;
+    Ok(file)
+}
+
+/// Writes an encrypted snapshot without holding the vault lock.
+pub fn write_backup(file: &BackupFile, path: &Path) -> Result<()> {
+    let json = serde_json::to_vec_pretty(file)?;
 
     let mut tmp_name = path
         .file_name()
@@ -130,7 +140,15 @@ fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
 /// [`Error::Io`]; [`Error::Format`] for something that is not a Hatoba backup;
 /// [`Error::UnsupportedVersion`] for a newer backup version.
 pub fn read_backup(path: &Path) -> Result<BackupFile> {
-    let bytes = std::fs::read(path)?;
+    // Bound memory use even if the file grows between metadata and read.
+    const MAX_BYTES: u64 = 256 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(Error::Format("backup exceeds 256 MiB".into()));
+    }
     let file: BackupFile =
         serde_json::from_slice(&bytes).map_err(|_| Error::Format("not a Hatoba backup".into()))?;
     if file.format != BACKUP_FORMAT {
@@ -142,52 +160,143 @@ pub fn read_backup(path: &Path) -> Result<BackupFile> {
     Ok(file)
 }
 
+/// Writes the current store using the existing export API.
+pub(crate) fn export(store: &Store, path: &Path, now_ms: i64) -> Result<()> {
+    write_backup(&snapshot(store, now_ms)?, path)
+}
+
+/// A backup verified completely before any current-vault state is changed.
+/// Decrypted data is wiped with the vault key and item types on drop.
+pub struct VerifiedBackup {
+    file: BackupFile,
+    vault_key: crate::crypto::Key32,
+    items: BTreeMap<String, crate::model::Item>,
+}
+
+impl BackupFile {
+    /// Checks the password, all item envelopes, unique IDs and recovery authentication material.
+    pub fn verify(self, password: &str) -> Result<VerifiedBackup> {
+        if self.format != BACKUP_FORMAT || self.v != BACKUP_VERSION {
+            return Err(Error::Format("unsupported Hatoba backup".into()));
+        }
+        let params = KdfParams::from_json(&self.kdf_params)?;
+        let salt = decode_salt(&self.kdf_salt)?;
+        // The recovery code is not available here, but its wrapped key must still be well formed.
+        let recovery = crate::crypto::Envelope::from_json(&self.recovery_vault_key)?;
+        if crate::crypto::b64_decode(&recovery.n)?.len() != 12
+            || crate::crypto::b64_decode(&recovery.c)?.len() != 48
+        {
+            return Err(Error::Format("invalid recovery key envelope".into()));
+        }
+        let keys = MasterKeys::from_password(password, &salt, &params);
+        let vault_key = match unwrap_key(&keys.enc_key, AAD_VAULT_KEY, &self.protected_vault_key) {
+            Ok(key) => key,
+            Err(Error::Decrypt) => return Err(Error::WrongPassword),
+            Err(error) => return Err(error),
+        };
+        if let Some(sealed) = &self.recovery_auth_sealed {
+            unwrap_key(&vault_key, crate::crypto::AAD_RECOVERY_AUTH, sealed)?;
+        }
+        let mut seen = HashSet::new();
+        let mut items = BTreeMap::new();
+        for row in &self.items {
+            if !(1..=64).contains(&row.id.len())
+                || !row
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                || !seen.insert(row.id.clone())
+                || (row.deleted && row.envelope.is_some())
+            {
+                return Err(Error::Format("invalid or duplicate backup item".into()));
+            }
+            if !row.deleted {
+                let envelope = row
+                    .envelope
+                    .as_deref()
+                    .ok_or_else(|| Error::Format("missing item envelope".into()))?;
+                let mut item = decode_envelope(&vault_key, &row.id, envelope)?;
+                item.strip_message_data();
+                items.insert(row.id.clone(), item);
+            }
+        }
+        Ok(VerifiedBackup {
+            file: self,
+            vault_key,
+            items,
+        })
+    }
+}
+
 impl Vault {
-    /// Restores a backup into an empty database (P2). The backup's master password is required;
-    /// all items are marked unsynced so they upload if sync is enabled later. The vault is
-    /// left unlocked and gets a fresh device id.
-    ///
-    /// # Errors
-    /// [`Error::VaultAlreadyInitialized`]; [`Error::WrongPassword`]; format errors from
-    /// [`read_backup`].
+    /// Captures one consistent encrypted snapshot. May be written after releasing the vault lock.
+    pub fn backup_snapshot(&self) -> Result<BackupFile> {
+        snapshot(&self.store, self.clock.now_ms())
+    }
+
+    /// Restores into an empty vault. Verification happens before any database mutation.
     pub fn import_backup_into_new_vault(&mut self, path: &Path, password: &str) -> Result<()> {
         if self.is_initialized() {
             return Err(Error::VaultAlreadyInitialized);
         }
-        let file = read_backup(path)?;
-        let params = KdfParams::from_json(&file.kdf_params)?;
-        let salt = decode_salt(&file.kdf_salt)?;
-        let keys = MasterKeys::from_password(password, &salt, &params);
-        let vault_key = match unwrap_key(&keys.enc_key, AAD_VAULT_KEY, &file.protected_vault_key) {
-            Ok(k) => k,
-            Err(Error::Decrypt) => return Err(Error::WrongPassword),
-            Err(e) => return Err(e),
-        };
+        self.restore_verified_backup(read_backup(path)?.verify(password)?, false)
+    }
+
+    /// Atomically applies a verified backup; replacement must have been explicitly confirmed.
+    /// Clears cloud connection and device-specific encrypted state, preserving local UI preferences.
+    pub fn restore_verified_backup(
+        &mut self,
+        verified: VerifiedBackup,
+        replace: bool,
+    ) -> Result<()> {
+        if self.is_initialized() && !replace {
+            return Err(Error::VaultAlreadyInitialized);
+        }
+        let VerifiedBackup {
+            file,
+            vault_key,
+            items,
+        } = verified;
         let check = seal_vault_check(&vault_key)?;
         self.store.transaction(|tx| {
-            tx.set_meta(
-                meta::SCHEMA_VERSION,
-                &crate::store::SCHEMA_VERSION.to_string(),
-            )?;
+            tx.conn().execute_batch("DELETE FROM items; DELETE FROM local_state; DELETE FROM conflict_log; DELETE FROM ai_file_snapshots;")?;
+            for key in [meta::SYNC_BACKEND, meta::SYNC_CURSOR, meta::SYNC_LAST_AT,
+                meta::RECENT_TARGETS, meta::MCP_DEVICE_STATE, meta::RECOVERY_AUTH_SEALED,
+                meta::UNLOCK_FAILURES, meta::UNLOCK_LAST_FAILURE_AT, meta::WORKER_UPDATE_DISMISSED] {
+                tx.delete_meta(key)?;
+            }
+            // Keep local preferences, but clear references to the old vault.
+            if let Some(prefs) = tx.get_meta(meta::LOCAL_PREFS)?
+                && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&prefs)
+                && value.is_object()
+            {
+                value["default_proxy_id"] = serde_json::Value::Null;
+                if let Some(backup) = value.get_mut("icloud_backup").and_then(|v| v.as_object_mut()) {
+                    backup.remove("last_at");
+                    backup.remove("last_checked");
+                    backup.remove("last_digest");
+                }
+                tx.set_meta(meta::LOCAL_PREFS, &value.to_string())?;
+            }
+            tx.set_meta(meta::SCHEMA_VERSION, &crate::store::SCHEMA_VERSION.to_string())?;
             tx.set_meta(meta::KDF_SALT, &file.kdf_salt)?;
             tx.set_meta(meta::KDF_PARAMS, &file.kdf_params)?;
             tx.set_meta(meta::PROTECTED_VAULT_KEY, &file.protected_vault_key)?;
             tx.set_meta(meta::RECOVERY_VAULT_KEY, &file.recovery_vault_key)?;
             tx.set_meta(meta::VAULT_CHECK, &check)?;
             tx.set_meta(meta::DEVICE_ID, &new_id())?;
+            if let Some(sealed) = &file.recovery_auth_sealed {
+                tx.set_meta(meta::RECOVERY_AUTH_SEALED, sealed)?;
+            }
             for item in &file.items {
-                tx.upsert_item_row(&ItemRow {
-                    id: item.id.clone(),
-                    envelope: item.envelope.clone().filter(|_| !item.deleted),
-                    revision: 0,
-                    deleted: item.deleted,
-                    dirty: true,
-                    updated_at: item.updated_at,
-                })?;
+                tx.upsert_item_row(&ItemRow { id: item.id.clone(), envelope: item.envelope.clone(),
+                    revision: 0, deleted: item.deleted, dirty: true, updated_at: item.updated_at })?;
             }
             Ok(())
         })?;
-        self.finish_unlock(vault_key)
+        // Every row was decoded before committing; installing the verified map cannot fail.
+        self.install_backup_unlock(vault_key, items);
+        Ok(())
     }
 }
 

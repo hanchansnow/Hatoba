@@ -8,6 +8,11 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 
 /** Commands */
 export const commands = {
+	icloudBackupStatus: (retry: boolean | null) => __TAURI_INVOKE<ICloudBackupStatus>("icloud_backup_status", { retry }),
+	showBackupInFinder: (path: string) => __TAURI_INVOKE<null>("show_backup_in_finder", { path }),
+	icloudBackupConfigure: (enabled: boolean, automatic: boolean) => __TAURI_INVOKE<null>("icloud_backup_configure", { enabled, automatic }),
+	icloudBackupNow: () => __TAURI_INVOKE<ICloudBackupStatus>("icloud_backup_now"),
+	icloudBackupRestore: (path: string, password: string, replace: boolean, currentPassword: string | null) => __TAURI_INVOKE<string | null>("icloud_backup_restore", { path, password, replace, currentPassword }),
 	appInfo: () => __TAURI_INVOKE<AppInfo>("app_info"),
 	/**  Opens the Windows 11 Snap Layouts flyout (hovering the custom maximize button, WIN-01). */
 	windowSnapOverlay: () => __TAURI_INVOKE<void>("window_snap_overlay"),
@@ -1103,6 +1108,23 @@ export type HostView = {
 	show_stats: boolean,
 	/**  Environment variables the terminal asks the server to set (SSH-14). */
 	env: HostEnvVar[],
+};
+
+/**  One immutable iCloud Drive encrypted snapshot. */
+export type ICloudBackupEntry = {
+	name: string,
+	created_at: number,
+	size: number,
+	/**  uploading, uploaded, pending, error, timeout (ten checks without confirmation), or unknown. */
+	transfer: string,
+};
+
+export type ICloudBackupStatus = {
+	enabled: boolean,
+	automatic: boolean,
+	last_at: number | null,
+	entries: ICloudBackupEntry[],
+	error: string | null,
 };
 
 export type ImportResult = {

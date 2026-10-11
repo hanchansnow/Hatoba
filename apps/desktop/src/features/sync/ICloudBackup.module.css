@@ -1,0 +1,18 @@
+.hint { color: var(--fg2); font-size: var(--text-sm); line-height: 1.6; margin: 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.path { word-break: break-all; color: var(--fg2); font-family: var(--font-mono); font-size: var(--text-sm); }
+.entry { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 0.5px solid var(--line); }
+.entry:last-child { border-bottom: 0; }
+.meta { flex: 1; min-width: 0; }
+.time { font-weight: 500; }
+.name { overflow-wrap: anywhere; font-size: 11px; color: var(--fg2); margin-top: 3px; }
+.state { display: flex; align-items: center; gap: 5px; color: var(--fg2); font-size: var(--text-sm); margin-top: 4px; }
+.good { color: var(--green); }
+.uploading { color: var(--accent); }
+.paused i { animation-play-state: paused !important; }
+.failed { color: var(--red); }
+.error { color: var(--orange); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.empty { padding: 18px 14px; color: var(--fg2); font-size: var(--text-sm); }
+.fields { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: var(--text-sm); }
+.check { display: flex; gap: 8px; align-items: flex-start; font-size: var(--text-sm); }

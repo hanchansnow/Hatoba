@@ -1257,6 +1257,7 @@ export interface WindowChromeEvent {
 }
 
 export interface EventMap {
+  "backup://changed": null;
   "vault://locked": VaultLockedEvent;
   "sync://status": SyncStatus;
   "ssh://hostkey-prompt": HostKeyPrompt;
@@ -1267,4 +1268,18 @@ export interface EventMap {
   /** An MCP server started, stopped, failed or relisted its tools (AI-32). */
   "ai://mcp-status": McpServerStatus;
   "window://chrome": WindowChromeEvent;
+}
+
+export interface ICloudBackupEntry {
+  name: string;
+  created_at: number;
+  size: number;
+  transfer: string;
+}
+export interface ICloudBackupStatus {
+  enabled: boolean;
+  automatic: boolean;
+  last_at: number | null;
+  entries: ICloudBackupEntry[];
+  error: string | null;
 }

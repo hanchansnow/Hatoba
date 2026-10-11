@@ -11,6 +11,8 @@ type Check<T extends true> = T;
 
 /** Rust → UI: command results and events. */
 export type ResponsesMatch = [
+  Check<Assignable<Rust.ICloudBackupStatus, Ui.ICloudBackupStatus>>,
+  Check<Assignable<Rust.ICloudBackupEntry, Ui.ICloudBackupEntry>>,
   Check<Assignable<Rust.AppError, Ui.AppError>>,
   Check<Assignable<Rust.AppInfo, Ui.AppInfo>>,
   Check<Assignable<Rust.UpdateCheck, Ui.UpdateCheck>>,

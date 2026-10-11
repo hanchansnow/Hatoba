@@ -57,7 +57,7 @@ function present(t: T, st: SyncStatus) {
   return { icon: "cloud-check", color: "var(--green)", title: t("sync.footer.synced"), sub };
 }
 
-export function SyncStatusView({ status, onReview }: { status: SyncStatus; onReview: () => void }) {
+export function SyncStatusView({ status, onReview, onBackup }: { status: SyncStatus; onReview: () => void; onBackup?: () => void }) {
   const t = useT();
   const view = present(t, status);
   const [busy, setBusy] = useState(false);
@@ -139,6 +139,9 @@ export function SyncStatusView({ status, onReview }: { status: SyncStatus; onRev
               <Row label={t("sync.row.auto")}>
                 <Switch checked={status.auto_sync} label={t("sync.row.auto")} onChange={(v) => void setAuto(v)} />
               </Row>
+              {onBackup && <Row label={t("backup.tab")}>
+                <LinkButton onClick={onBackup}>{t("backup.manage")}</LinkButton>
+              </Row>}
             </Group>
           </Section>
 

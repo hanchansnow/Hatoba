@@ -1999,3 +1999,21 @@ mod tests {
         assert!(!prefs.host_probe);
     }
 }
+
+/// One immutable iCloud Drive encrypted snapshot.
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct ICloudBackupEntry {
+    pub name: String,
+    pub created_at: i64,
+    pub size: u64,
+    /// uploading, uploaded, pending, error, timeout (ten checks without confirmation), or unknown.
+    pub transfer: String,
+}
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct ICloudBackupStatus {
+    pub enabled: bool,
+    pub automatic: bool,
+    pub last_at: Option<i64>,
+    pub entries: Vec<ICloudBackupEntry>,
+    pub error: Option<String>,
+}

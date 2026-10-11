@@ -1,3 +1,5 @@
+import { BackupRestore, chooseBackupFile } from "@/features/sync/ICloudBackup";
+import { useApp } from "@/app/store";
 import { useState } from "react";
 import { WindowChrome } from "@/app/TitleBar";
 import { AppLogo, Button, Icon } from "@/components/controls";
@@ -16,6 +18,8 @@ type Step = "choose" | "password" | "recovery" | "connect" | "restorePassword";
 /** First launch (spec §6.6 flows A/B, VAULT-01/02): create a new vault or restore one from the cloud. */
 export function Onboarding() {
   const t = useT();
+  const mac = useApp((st) => st.info.platform === "macos");
+  const [backupFile, setBackupFile] = useState<string | null>(null);
   const [flow, setFlow] = useState<Flow>("create");
   const [step, setStep] = useState<Step>("choose");
   const [code, setCode] = useState("");
@@ -29,6 +33,7 @@ export function Onboarding() {
   return (
     <div className={s.root}>
       <WindowChrome />
+      {backupFile && <BackupRestore path={backupFile} onClose={() => setBackupFile(null)} />}
       <div className={s.center}>
         <AppLogo className={s.logo} />
         {step === "choose" && (
@@ -40,6 +45,7 @@ export function Onboarding() {
             onSubmit={() => setStep(flow === "create" ? "password" : "connect")}
             footer={
               <>
+                {mac && <Button onClick={() => void chooseBackupFile().then(setBackupFile)}>{t("backup.firstRestore")}</Button>}
                 <FooterSpacer />
                 <Button variant="primary" type="submit" autoFocus>
                   {t("btn.continue")}
