@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Button, Icon, LinkButton, Switch, TextField } from "@/components/controls";
 import { Group, Row, RowValue, Section, StatusTile } from "@/components/layout";
 import { confirm, toast } from "@/components/overlay";
@@ -6,11 +6,12 @@ import { errorMessage } from "@/app/errors";
 import { useApp } from "@/app/store";
 import { formatRelative, useT } from "@/i18n";
 import { api } from "@/ipc/api";
-import type { DeviceView, SyncStatus, WorkerUpdate } from "@/ipc/types";
+import type { DeviceView, SyncStatus, TooLargeItem, WorkerUpdate } from "@/ipc/types";
 import { cx } from "@/lib/cx";
 import { isImeEvent } from "@/lib/ime";
 import { DEPLOY_GUIDE_URL, openExternal } from "./external";
-import { ChangePasswordDialog, RecoveryCodeDialog } from "./SyncDialogs";
+import { NewRecoveryDialog, VerifyPasswordDialog } from "@/features/settings/dialogs";
+import { ChangePasswordDialog } from "./SyncDialogs";
 import { countsLine, deviceIcon, isStale, refreshSyncStatus, type T } from "./syncUtils";
 import { UpgradeDialog } from "./UpgradeDialog";
 import s from "./Sync.module.css";
@@ -121,6 +122,10 @@ export function SyncStatusView({ status, onReview, onBackup }: { status: SyncSta
             </div>
           )}
 
+          {status.too_large.map((item) => (
+            <TooLargeNotice key={item.item_id} item={item} />
+          ))}
+
           <Section title={t("sync.sec.connection")}>
             <Group>
               <Row label={t("sync.row.method")}>
@@ -191,6 +196,37 @@ function WorkerUpdateNotice({ update, onUpdate }: { update: WorkerUpdate; onUpda
           {t("sync.wu.dismiss")}
         </LinkButton>
       )}
+    </div>
+  );
+}
+
+/** §6.3: an item too large to sync stays pending; names it and what to shorten. */
+function TooLargeNotice({ item }: { item: TooLargeItem }) {
+  const t = useT();
+  const navigate = useApp((st) => st.navigate);
+  const openSettings = useApp((st) => st.openSettings);
+
+  let text: string;
+  let action: ReactNode = null;
+  if (item.item_type === "host") {
+    text = t("sync.tooLarge.host", { name: item.item_name });
+    action = (
+      <LinkButton onClick={() => navigate({ kind: "host-edit", hostId: item.item_id, groupId: null, back: { kind: "all" } })}>
+        {t("hosts.editHost")}
+      </LinkButton>
+    );
+  } else if (item.item_type === "settings") {
+    text = t("sync.tooLarge.settings");
+    action = <LinkButton onClick={() => openSettings(true, "ai")}>{t("ai.noProvider.open")}</LinkButton>;
+  } else {
+    text = t("sync.tooLarge.item", { name: item.item_name });
+  }
+
+  return (
+    <div className={s.banner} role="status">
+      <Icon name="warning-circle" className={s.bannerIcon} />
+      <span className={s.bannerText}>{text}</span>
+      {action}
     </div>
   );
 }
@@ -318,6 +354,7 @@ function Devices({ status }: { status: SyncStatus }) {
 function SecurityNote() {
   const t = useT();
   const [dialog, setDialog] = useState<"recovery" | "password" | null>(null);
+  const [newCode, setNewCode] = useState<string | null>(null);
 
   const disconnect = async () => {
     const ok = await confirm({
@@ -339,7 +376,7 @@ function SecurityNote() {
     <div className={s.security}>
       <Icon name="shield-check" className={s.securityIcon} />
       <div className={s.securityText}>
-        <span className={s.securityTitle}>{t("sync.security.title")}</span> {t("sync.security.body")}
+        <span className={s.securityTitle}>{t("sync.security.title")}</span>
         <div className={s.securityLinks}>
           <LinkButton className={s.securityLink} onClick={() => setDialog("recovery")}>
             {t("sync.link.recovery")}
@@ -352,8 +389,15 @@ function SecurityNote() {
           </LinkButton>
         </div>
       </div>
-      {dialog === "recovery" && <RecoveryCodeDialog onClose={() => setDialog(null)} />}
+      {dialog === "recovery" && (
+        <VerifyPasswordDialog
+          body={t("settings.verify.recovery")}
+          onClose={() => setDialog(null)}
+          onVerify={async (pw) => setNewCode(await api.vault_rotate_recovery(pw))}
+        />
+      )}
       {dialog === "password" && <ChangePasswordDialog onClose={() => setDialog(null)} />}
+      {newCode && <NewRecoveryDialog code={newCode} onClose={() => setNewCode(null)} />}
     </div>
   );
 }

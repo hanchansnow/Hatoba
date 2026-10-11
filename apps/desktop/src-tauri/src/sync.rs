@@ -18,13 +18,15 @@ use hatoba_core::sync::{
     Backoff, CancelToken, D1Backend, SyncBackend, SyncConfig, SyncEngine, WorkerBackend,
     WorkerCompat, load_session, worker_compat,
 };
+use hatoba_core::vault::Vault;
 use tauri::AppHandle;
 use tauri_specta::Event;
 use tokio::sync::Notify;
 
-use crate::dto::{SyncCounts, SyncKind, SyncState, SyncStatus, WorkerUpdate, WorkerUpdateKind};
+use crate::dto::{
+    SyncCounts, SyncKind, SyncState, SyncStatus, TooLargeItem, WorkerUpdate, WorkerUpdateKind,
+};
 use crate::error::{AppError, AppResult};
-use crate::lock;
 use crate::state::{AppState, state};
 
 const INTERVAL: Duration = Duration::from_secs(60);
@@ -56,6 +58,9 @@ struct Inner {
     pending_trigger: Option<Trigger>,
     /// Worker mode: the last `/v1/health` reading since the backend was set.
     worker: Option<WorkerCheck>,
+    /// The ids the last finished round of this connection could not upload because they are too
+    /// large (`SyncReport::too_large`).
+    too_large: Vec<String>,
 }
 
 /// The backend of one connection, as a round captures it when it starts.
@@ -85,6 +90,7 @@ impl Default for SyncController {
                 auto: true,
                 pending_trigger: None,
                 worker: None,
+                too_large: Vec::new(),
             }),
             wake: Notify::new(),
             round: tokio::sync::Mutex::new(()),
@@ -162,6 +168,7 @@ impl SyncController {
                 };
                 inner.message = None;
                 inner.worker = None;
+                inner.too_large.clear();
                 let old = std::mem::replace(&mut inner.backend, backend);
                 let replaced = old.filter(|old| {
                     !inner
@@ -367,13 +374,14 @@ pub fn status(app: &AppHandle) -> SyncStatus {
     let st = state(app);
     let vault = st.vault();
     let config = vault.sync_config().ok().flatten();
-    let (state, message, auto, worker) = {
+    let (state, message, auto, worker, too_large) = {
         let inner = st.sync.inner();
         (
             inner.state,
             inner.message.clone(),
             inner.auto,
             inner.worker.as_ref().map(|w| (w.compat, w.version.clone())),
+            inner.too_large.clone(),
         )
     };
     let worker_update = worker.and_then(|(compat, version)| {
@@ -427,6 +435,11 @@ pub fn status(app: &AppHandle) -> SyncStatus {
             groups,
         }
     });
+    let too_large = if unlocked {
+        too_large_items(&vault, too_large)
+    } else {
+        Vec::new()
+    };
     SyncStatus {
         kind,
         endpoint,
@@ -447,7 +460,23 @@ pub fn status(app: &AppHandle) -> SyncStatus {
         message,
         counts,
         worker_update,
+        too_large,
     }
+}
+
+/// Names the items the last round could not upload. An item deleted since then has nothing left
+/// to upload and is left out.
+fn too_large_items(vault: &Vault, ids: Vec<String>) -> Vec<TooLargeItem> {
+    ids.into_iter()
+        .filter_map(|id| {
+            let item = vault.get(&id)?;
+            Some(TooLargeItem {
+                item_type: crate::commands::sync::item_type(Some(item)),
+                item_name: item.display_name(),
+                item_id: id,
+            })
+        })
+        .collect()
 }
 
 pub fn emit_status(app: &AppHandle) {
@@ -504,17 +533,22 @@ pub async fn run_round(app: &AppHandle) -> AppResult<()> {
     let engine = SyncEngine::new(st.vault.clone(), Arc::clone(&conn.backend))
         .with_conflict_suffix(conflict_suffix(app))
         .with_cancel(conn.cancel.clone());
-    // Pulled settings take effect now, not at the next local save or unlock.
-    let result = lock::refresh_after_sync(&st, engine.sync()).await;
+    let result = engine.sync().await;
     let outcome = match result {
         Ok(report) => {
             tracing::info!(
                 pulled = report.pulled,
                 pushed = report.pushed,
                 conflicts = report.conflicts_resolved,
+                failed = report.failed,
                 "sync round done"
             );
-            if st.sync.set_state_for(&conn, SyncState::Idle, None) {
+            let current = st.sync.update_for(&conn, |inner| {
+                inner.state = SyncState::Idle;
+                inner.message = None;
+                inner.too_large = report.too_large;
+            });
+            if current {
                 adopt_legacy_prefs(app);
             }
             Ok(())
@@ -624,14 +658,17 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use hatoba_core::KdfParams;
+    use hatoba_core::model::{Host, Item, SETTINGS_ID};
     use hatoba_core::sync::{Session, SyncBackend, WorkerBackend};
+    use hatoba_core::vault::Vault;
     use tokio::sync::Notify;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zeroize::Zeroizing;
 
-    use super::SyncController;
-    use crate::dto::SyncState;
+    use super::{SyncController, too_large_items};
+    use crate::dto::{ItemType, SyncState};
 
     /// A Worker that answers the device list, so a request shows whether a backend can still
     /// authenticate.
@@ -699,6 +736,51 @@ mod tests {
         let current = sync.connection().unwrap();
         assert!(sync.set_state_for(&current, SyncState::Syncing, None));
         assert_eq!(sync.inner().state, SyncState::Syncing);
+    }
+
+    #[tokio::test]
+    async fn a_new_connection_forgets_the_items_too_large_to_sync() {
+        let server = worker().await;
+        let sync = SyncController::default();
+        sync.set_backend(Some(signed_in(&server)));
+        let old = sync.connection().unwrap();
+        assert!(sync.update_for(&old, |inner| inner.too_large = vec!["big".into()]));
+
+        sync.set_backend(Some(signed_in(&server)));
+        assert!(sync.inner().too_large.is_empty());
+        // A round of the ended connection can't bring them back.
+        assert!(!sync.update_for(&old, |inner| inner.too_large = vec!["big".into()]));
+        assert!(sync.inner().too_large.is_empty());
+    }
+
+    #[test]
+    fn items_too_large_to_sync_are_named_unless_deleted_since() {
+        let mut v = Vault::open_in_memory().unwrap();
+        v.create_with_params(&hatoba_core::new_id(), KdfParams::for_tests())
+            .unwrap();
+        let host = v
+            .put(
+                None,
+                Item::Host(Host {
+                    name: "big".into(),
+                    address: "big.example.org".into(),
+                    ..Host::default()
+                }),
+            )
+            .unwrap();
+        let ids = vec![host.clone(), SETTINGS_ID.to_owned(), "deleted".to_owned()];
+        let items = too_large_items(&v, ids);
+        let shown: Vec<_> = items
+            .iter()
+            .map(|i| (i.item_id.as_str(), i.item_type, i.item_name.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (host.as_str(), ItemType::Host, "big"),
+                (SETTINGS_ID, ItemType::Settings, "settings"),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -3,8 +3,8 @@ import type { McpServerView, McpToolAnnotations, McpToolView } from "@/ipc/types
 import {
   annotationKeys,
   argRows,
-  commandPreview,
   formatCommandLine,
+  freeServerName,
   hasMcpProblems,
   initialMcpForm,
   isBlankRow,
@@ -15,6 +15,7 @@ import {
   savedSecretRows,
   secretInputs,
   serverState,
+  shownRowProblems,
   splitCommandLine,
   stderrText,
   toolAllowed,
@@ -25,6 +26,7 @@ import {
   withAlwaysAllow,
   type McpForm,
   type SecretRow,
+  type SecretRowProblem,
 } from "./mcpLogic";
 
 const stdioServer = (extra: Partial<McpServerView> = {}): McpServerView => ({
@@ -137,6 +139,12 @@ describe("environment and header rows", () => {
     expect(validateSecretRows([row("Bad Header", "x"), row("a:b", "x")], "header")).toEqual([{ key: "invalid" }, { key: "invalid" }]);
   });
 
+  it("shows an empty name or value only once the user tried to save", () => {
+    const problems: (SecretRowProblem | null)[] = [null, { key: "empty" }, { value: "missing" }, { key: "duplicate", value: "missing" }, { key: "invalid" }];
+    expect(shownRowProblems(problems, false)).toEqual([null, null, null, { key: "duplicate" }, { key: "invalid" }]);
+    expect(shownRowProblems(problems, true)).toEqual(problems);
+  });
+
   it("lets a saved row stay without a value", () => {
     expect(validateSecretRows(savedSecretRows(["TOKEN"]), "env")).toEqual([null]);
   });
@@ -156,6 +164,17 @@ describe("environment and header rows", () => {
       { key: "REPLACE", value: "new" },
       { key: "EMPTY", value: null },
     ]);
+  });
+
+  it("drops an optional row left without a value, and sends it once one is typed", () => {
+    const optional = row("Authorization", " ", { optional: true });
+    expect(isBlankRow(optional)).toBe(true);
+    expect(validateSecretRows([optional], "header")).toEqual([null]);
+    expect(secretInputs([optional])).toEqual([]);
+    const typed = { ...optional, draft: { mode: "replace" as const, value: "x" } };
+    expect(isBlankRow(typed)).toBe(false);
+    expect(secretInputs([typed])).toEqual([{ key: "Authorization", value: "x" }]);
+    expect(isBlankRow(row("Authorization", ""))).toBe(false);
   });
 
   it("sends a new row's value and trims the name", () => {
@@ -189,6 +208,13 @@ describe("the form", () => {
   it("accepts a complete stdio server and a complete http server", () => {
     expect(hasMcpProblems(validateMcpForm(valid()))).toBe(false);
     expect(hasMcpProblems(validateMcpForm(valid({ kind: "http", url: "https://example.com/mcp" })))).toBe(false);
+  });
+
+  it("finds a free name the way validation compares names", () => {
+    expect(freeServerName("github", [])).toBe("github");
+    expect(freeServerName("github", [" GitHub "])).toBe("github-2");
+    expect(freeServerName("github", ["github", "GITHUB-2", "github-4"])).toBe("github-3");
+    expect(validateMcpForm(valid({ name: freeServerName("github", ["github"]) }), ["github"]).name).toBeNull();
   });
 
   it("flags a missing or taken name, case-insensitively", () => {
@@ -233,16 +259,31 @@ describe("the form", () => {
     });
   });
 
+  const httpInput = (rows: SecretRow[]) => mcpFormToInput(null, valid({ kind: "http", url: "https://x.test/mcp", headers: rows })).transport;
+
+  it("puts Bearer in front of an Authorization value without a space", () => {
+    expect(httpInput([row("Authorization", " github_pat_x ")])).toMatchObject({ headers: [{ key: "Authorization", value: "Bearer github_pat_x" }] });
+    expect(httpInput([row("authorization", "lin_api_x")])).toMatchObject({ headers: [{ key: "authorization", value: "Bearer lin_api_x" }] });
+  });
+
+  it("puts Bearer in front of a token that replaces a saved Authorization value", () => {
+    const f = initialMcpForm(httpServer());
+    const headers = f.headers.map((r) => ({ ...r, draft: { mode: "replace" as const, value: "new_token" } }));
+    expect(mcpFormToInput("m2", { ...f, headers }).transport).toMatchObject({ headers: [{ key: "Authorization", value: "Bearer new_token" }] });
+  });
+
+  it("leaves an Authorization value with a scheme, a kept value, other headers, and variables as they are", () => {
+    expect(httpInput([row("Authorization", "Bearer x")])).toMatchObject({ headers: [{ value: "Bearer x" }] });
+    expect(httpInput([row("Authorization", "Basic abc")])).toMatchObject({ headers: [{ value: "Basic abc" }] });
+    expect(httpInput([row("Authorization", "token abc")])).toMatchObject({ headers: [{ value: "token abc" }] });
+    expect(httpInput(savedSecretRows(["Authorization"]))).toMatchObject({ headers: [{ key: "Authorization", value: null }] });
+    expect(httpInput([row("X-Api-Key", "abc")])).toMatchObject({ headers: [{ key: "X-Api-Key", value: "abc" }] });
+    expect(mcpFormToInput(null, valid({ env: [row("Authorization", "abc")] })).transport).toMatchObject({ env: [{ key: "Authorization", value: "abc" }] });
+  });
+
   it("keeps the other transport's rows out of the input", () => {
     const f = { ...initialMcpForm(stdioServer()), kind: "http" as const, url: "https://x.test/mcp" };
     expect(mcpFormToInput("m1", f).transport).toEqual({ kind: "http", url: "https://x.test/mcp", headers: [] });
-  });
-
-  it("previews the command line and the variable names, never the values", () => {
-    const f = valid({ command: "npx", args: argRows(["-y", "My Docs"]), env: [row("TOKEN", "super-secret"), savedSecretRows(["OLD"])[0]] });
-    const p = commandPreview(f);
-    expect(p).toEqual({ line: 'npx -y "My Docs"', envNames: ["TOKEN", "OLD"] });
-    expect(JSON.stringify(p)).not.toContain("super-secret");
   });
 });
 

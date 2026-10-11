@@ -31,7 +31,6 @@ use super::stdio::{self, ChildGuard, StderrTail};
 use super::{McpError, McpTool, McpToolResult, McpTransportConfig, ToolAnnotations};
 use crate::error::AiError;
 use crate::net::{clean_message, network_error};
-use crate::provider::client_for;
 
 /// How long a stdio server gets to exit by itself after its stdin closes, and an HTTP session to
 /// be deleted, before shutdown kills or drops it.
@@ -114,7 +113,10 @@ impl<T: Transport<RoleClient>> Transport<RoleClient> for Watched<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Stdio,
-    Http,
+    /// `token`: the configuration sends an `Authorization` header (see [`http_error_message`]).
+    Http {
+        token: bool,
+    },
 }
 
 struct Inner {
@@ -161,11 +163,8 @@ impl McpConnection {
     /// inherits the environment plus `env`, gets no console window on Windows, and its stderr
     /// goes to an in-memory ring of the last [`super::STDERR_LINES`] lines that is never logged.
     ///
-    /// HTTP: `headers` go with every request; the URL must be `https`, or `http` for a loopback
-    /// or private network address (the provider base URL rules, AI-02). `http` is the shared
-    /// client from [`crate::provider::http_client`], except for an `http` URL with a host name:
-    /// that gets its own client, which resolves the name again when connecting and refuses a
-    /// public address (DNS rebinding) and does not use the system proxy.
+    /// HTTP: `headers` go with every request; the URL must be `http` or `https` (the provider base
+    /// URL rules, AI-02). `http` is the shared client from [`crate::provider::http_client`].
     ///
     /// On failure a started child is killed and its stderr is lost; use
     /// [`Self::connect_with_stderr`] to keep it.
@@ -374,7 +373,10 @@ impl McpConnection {
             ServiceError::TransportClosed => McpError::Closed,
             // A stdio write fails only when the child's stdin is gone.
             ServiceError::TransportSend(_) if self.inner.kind == Kind::Stdio => McpError::Closed,
-            ServiceError::TransportSend(e) => McpError::Connect(describe(e.error.as_ref())),
+            ServiceError::TransportSend(e) => McpError::Connect(describe(
+                e.error.as_ref(),
+                self.inner.kind == Kind::Http { token: true },
+            )),
             ServiceError::UnexpectedResponse => {
                 McpError::Protocol("the answer does not match the request".into())
             }
@@ -479,12 +481,13 @@ fn stdio_init_error(
         | ClientInitializeError::TransportError { .. } => {
             McpError::Spawn("the server closed its output before it finished starting".into())
         }
-        other => init_error(other),
+        other => init_error(other, false),
     }
 }
 
-/// The errors both transports share; transport failures are mapped by the caller.
-fn init_error(err: &ClientInitializeError) -> McpError {
+/// The errors both transports share; transport failures are mapped by the caller. `token` as
+/// in [`http_error_message`].
+fn init_error(err: &ClientInitializeError, token: bool) -> McpError {
     match err {
         ClientInitializeError::JsonRpcError(data) => McpError::Server(server_message(data)),
         ClientInitializeError::Cancelled => McpError::Cancelled,
@@ -492,7 +495,7 @@ fn init_error(err: &ClientInitializeError) -> McpError {
             McpError::Connect("the connection closed before the server answered".into())
         }
         ClientInitializeError::TransportError { error, .. } => {
-            McpError::Connect(describe(error.error.as_ref()))
+            McpError::Connect(describe(error.error.as_ref(), token))
         }
         ClientInitializeError::NoCompatibleProtocolVersion { .. } => {
             McpError::Protocol("the server supports no protocol version Hatoba speaks".into())
@@ -507,13 +510,14 @@ async fn connect_http(
     http: &reqwest::Client,
     timeout: Duration,
 ) -> Result<McpConnection, McpError> {
-    let url = server_url(url).await?;
+    let url = server_url(url)?;
+    let token = headers
+        .iter()
+        .any(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"));
     let headers = header_map(headers)?;
     let config =
         StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
-    // An `http` URL with a host name gets a client that keeps to local addresses at connect time.
-    let transport =
-        StreamableHttpClientTransport::with_client(client_for(http, &url).into_owned(), config);
+    let transport = StreamableHttpClientTransport::with_client(http.clone(), config);
     let tools_changed = Arc::new(AtomicBool::new(false));
     let transport = Watched {
         inner: transport,
@@ -521,29 +525,26 @@ async fn connect_http(
     };
     match tokio::time::timeout(timeout, rmcp::serve_client(Handler, transport)).await {
         Ok(Ok(service)) => Ok(McpConnection::new(
-            Kind::Http,
+            Kind::Http { token },
             service,
             None,
             tools_changed,
             StderrTail::new(),
             timeout,
         )),
-        Ok(Err(err)) => Err(init_error(&err)),
+        Ok(Err(err)) => Err(init_error(&err, token)),
         Err(_) => Err(McpError::Timeout),
     }
 }
 
 /// AI-02's base URL rules, with messages about the server URL.
-async fn server_url(url: &str) -> Result<url::Url, McpError> {
-    crate::provider::validate_base_url(url)
-        .await
-        .map_err(|e| match e {
-            AiError::InvalidUrl(message) => {
-                McpError::InvalidUrl(message.replace("base URL", "server URL"))
-            }
-            AiError::Network(message) => McpError::Connect(message),
-            other => McpError::InvalidUrl(other.to_string()),
-        })
+fn server_url(url: &str) -> Result<url::Url, McpError> {
+    crate::provider::validate_base_url(url).map_err(|e| match e {
+        AiError::InvalidUrl(message) => {
+            McpError::InvalidUrl(message.replace("base URL", "server URL"))
+        }
+        other => McpError::InvalidUrl(other.to_string()),
+    })
 }
 
 /// The configured headers as sensitive header values. Messages name the header, never its value.
@@ -575,12 +576,13 @@ fn header_map(
     Ok(map)
 }
 
-/// A transport failure as one line without the URL (reqwest puts it in its messages).
-fn describe(err: &(dyn std::error::Error + Send + Sync + 'static)) -> String {
+/// A transport failure as one line without the URL (reqwest puts it in its messages). `token`
+/// as in [`http_error_message`].
+fn describe(err: &(dyn std::error::Error + Send + Sync + 'static), token: bool) -> String {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(e) = current {
         if let Some(e) = e.downcast_ref::<StreamableHttpError<reqwest::Error>>() {
-            return http_error_message(e);
+            return http_error_message(e, token);
         }
         if let Some(e) = e.downcast_ref::<reqwest::Error>() {
             return network_message(e);
@@ -597,9 +599,18 @@ fn network_message(err: &reqwest::Error) -> String {
     }
 }
 
-fn http_error_message(err: &StreamableHttpError<reqwest::Error>) -> String {
+/// `token`: the configuration sends an `Authorization` header, so a 401, with a challenge or
+/// without one, means the server refused that token. Only the header's name is looked at.
+fn http_error_message(err: &StreamableHttpError<reqwest::Error>, token: bool) -> String {
+    const TOKEN_REFUSED: &str = "the token is invalid or has expired (HTTP 401)";
     match err {
         StreamableHttpError::Client(e) => network_message(e),
+        StreamableHttpError::AuthRequired(_) if token => TOKEN_REFUSED.into(),
+        StreamableHttpError::UnexpectedServerResponse(message)
+            if token && message.starts_with("HTTP 401") =>
+        {
+            TOKEN_REFUSED.into()
+        }
         StreamableHttpError::AuthRequired(_) => "the server requires authorization (HTTP 401): \
              give it the credentials it expects as a request header; Hatoba does not sign in \
              to MCP servers with OAuth"

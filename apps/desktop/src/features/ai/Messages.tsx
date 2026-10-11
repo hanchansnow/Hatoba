@@ -1,5 +1,4 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useApp } from "@/app/store";
 import { Button, Icon, IconButton, LinkButton, Spinner } from "@/components/controls";
 import { PopupSelect, toast } from "@/components/overlay";
 import { readClipboard, writeClipboard } from "@/features/terminal/clipboard";
@@ -18,7 +17,6 @@ import {
   retryTurn,
   revertFileChange,
   stopSideQuestion,
-  stopTurn,
   tooMuchMessage,
   type Decision,
 } from "./actions";
@@ -29,12 +27,30 @@ import { composeMessage, fitsMessage, isLongPaste, makePaste, parseMessage, type
 import { insertAtCaret, isPlainPasteKey } from "./Composer";
 import { forkPoints } from "./fork";
 import { Markdown } from "./Markdown";
+import { useMcp } from "./mcp";
 import { noteLabel, noteTitle } from "./notes";
 import { replies as findReplies, type ReplyEnd } from "./replies";
 import { revertFailure } from "./revertText";
 import { sideRunning, type SideQuestion } from "./side";
 import { patchSlot, useAi, type Slot } from "./store";
-import { callFileChange, callSummary, exitStatusOf, offersAllowHere, parseArgs, prettyArgs, SEND_KEYS, shownText, toolKind, toolLabel, type SendKey, type ToolKind } from "./tools";
+import {
+  allowanceScope,
+  callFileChange,
+  callSummary,
+  exitStatusOf,
+  parseArgs,
+  prettyArgs,
+  proxyArguments,
+  proxyCall,
+  SEND_KEYS,
+  shownCall,
+  shownText,
+  toolKind,
+  toolLabel,
+  type Scope,
+  type SendKey,
+  type ToolKind,
+} from "./tools";
 import { callRevealKey, editedFiles, revealKey, type CallState, type LiveResponse } from "./turn";
 import s from "./Messages.module.css";
 
@@ -50,6 +66,7 @@ const TOOL_ICON: Record<ToolKind, string> = {
   web_search: "magnifying-glass",
   fetch_url: "globe",
   read_skill: "book-open",
+  search_tools: "list-magnifying-glass",
   mcp: "plug",
   unknown: "question",
 };
@@ -215,7 +232,7 @@ export function MessageList({ slotId, slot, host, empty }: { slotId: string; slo
                 change={(call) => changes.get(`${entry.entry_id}:${call.id}`)}
                 busy={busy}
                 host={host}
-                finish={entry.finish}
+                noAnswerShown={outcome?.reason === "empty" && entry.entry_id === lastAssistant}
                 flash={flash}
                 reply={reply}
                 onFork={reply ? fork(entry.entry_id) : undefined}
@@ -346,12 +363,12 @@ function UserMessage({
   );
 }
 
-const NOTE_ICONS = { interrupted: "stop-circle", host_change: "arrows-left-right", model_change: "swap", file_revert: "arrow-counter-clockwise" } as const;
+const NOTE_ICONS = { interrupted: "stop-circle", host_change: "arrows-left-right", model_change: "swap", file_revert: "arrow-counter-clockwise", mcp_tools: "plug" } as const;
 
 /**
  * A note Hatoba stored before a message: the user stopped the reply before it, the conversation moved
- * to another host, a terminal became attached or went away, it went to another model, or the user
- * reverted a file tool's change.
+ * to another host, a terminal became attached or went away, it went to another model, the user
+ * reverted a file tool's change, or it listed the deferred MCP tools (AI-45).
  */
 function NoteDivider({ note }: { note: Note }) {
   const t = useT();
@@ -523,7 +540,7 @@ function AssistantMessage({
   busy,
   host,
   streaming,
-  finish,
+  noAnswerShown,
   flash,
   reply,
   onFork,
@@ -541,7 +558,8 @@ function AssistantMessage({
   busy?: boolean;
   host: HostInfo | null;
   streaming?: boolean;
-  finish?: string;
+  /** The turn's outcome below says that this reply has no answer (§13.1), so the reply does not say it too. */
+  noAnswerShown?: boolean;
   /** The highlighted search hit (AI-24). */
   flash?: string | null;
   /** The finished reply this entry ends: its text for Copy, and when it ended. */
@@ -554,7 +572,8 @@ function AssistantMessage({
     <div className={s.assistant}>
       {reasoning && <Reasoning text={reasoning} active={thinking} />}
       {text && <Markdown text={text} streaming={streaming && calls.length === 0} />}
-      {!text && !reasoning && calls.length === 0 && !streaming && finish !== "tool_calls" && <EmptyReply />}
+      {/* No answer: nothing at all, or only reasoning. */}
+      {!text.trim() && calls.length === 0 && !streaming && !noAnswerShown && <EmptyReply />}
       {calls.map((call) => {
         const reveal = entryId ? callRevealKey(entryId, call.id) : undefined;
         return <ToolBlock key={call.id} slotId={slotId} call={call} view={view(call)} change={change?.(call)} busy={!!busy} host={host} reveal={reveal} flash={!!reveal && flash === reveal} />;
@@ -643,8 +662,6 @@ function StatusChip({ view, name }: { view: CallView; name: string }) {
       );
     case "approval":
       return <span className={cx(s.chip, s.chipWarn)}>{t("ai.call.approval")}</span>;
-    case "limit":
-      return <span className={cx(s.chip, s.chipWarn)}>{t("ai.call.paused")}</span>;
     case "queued":
     case "streaming":
       return <span className={s.chip}>{t("ai.call.queued")}</span>;
@@ -705,8 +722,10 @@ function ToolBlock({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const kind = toolKind(call.name);
-  const summary = callSummary(call.name, call.arguments);
+  // AI-45: a `call_mcp_tool` call shows as the MCP tool it names.
+  const shown = shownCall(call);
+  const kind = toolKind(shown.name);
+  const summary = callSummary(shown.name, shown.arguments);
   const revertible = change?.state === "written" || change?.state === "unfinished";
   const revert = useRevert(slotId, change);
   useEffect(() => {
@@ -716,11 +735,11 @@ function ToolBlock({
   if (view.kind === "approval") return <ApprovalCard slotId={slotId} call={call} host={host} mcp={view.mcp ?? null} />;
 
   return (
-    <div className={cx(s.tool, view.kind === "limit" && s.toolAttention, flash && s.flash)} data-reveal={reveal}>
+    <div className={cx(s.tool, flash && s.flash)} data-reveal={reveal}>
       <div className={s.toolHeadRow}>
         <button type="button" className={s.toolHead} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
           <Icon name={TOOL_ICON[kind]} size={14} className={s.toolIcon} />
-          <span className={s.toolName}>{toolLabel(t, call.name)}</span>
+          <span className={s.toolName}>{toolLabel(t, shown.name)}</span>
           <span className={s.toolSummary}>{summary}</span>
           {change?.state === "reverted" ? (
             <span className={s.chip}>
@@ -754,7 +773,7 @@ function ToolBlock({
           ) : (
             <>
               <div className={s.label}>{t("ai.call.input")}</div>
-              <pre className={cx(s.pre, "selectable")}>{prettyArgs(call.arguments) || "{}"}</pre>
+              <pre className={cx(s.pre, "selectable")}>{prettyArgs(shown.arguments) || "{}"}</pre>
             </>
           )}
           {view.kind === "result" && (
@@ -771,7 +790,6 @@ function ToolBlock({
           )}
         </div>
       )}
-      {view.kind === "limit" && <LimitCard slotId={slotId} />}
     </div>
   );
 }
@@ -888,25 +906,6 @@ function RevertChange({ slotId, change, busy, revert }: { slotId: string; change
   );
 }
 
-/** AI-18: the turn paused at the tool call limit. */
-function LimitCard({ slotId }: { slotId: string }) {
-  const t = useT();
-  const limit = useApp((st) => st.prefs.ai_tool_call_limit);
-  return (
-    <div className={s.cardFoot}>
-      <span className={s.cardText}>{t("ai.limit.body", { n: limit })}</span>
-      <div className={s.actions}>
-        <Button size="sm" onClick={() => void stopTurn(slotId)}>
-          {t("ai.stop")}
-        </Button>
-        <Button size="sm" variant="primary" icon="play" onClick={() => decideCall(slotId, { kind: "continue" })}>
-          {t("btn.continue")}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 /** The fields the Edit form shows: the main input of each tool, or the JSON for others. */
 interface Draft {
   main: string;
@@ -924,8 +923,6 @@ function draftFrom(kind: ToolKind, args: Record<string, unknown>, json: string):
       return { main: str(args.text), timeout: "", key: (SEND_KEYS as readonly string[]).includes(str(args.key)) ? (str(args.key) as SendKey) : "", wait: str(args.wait_seconds) };
     case "fetch_url":
       return { main: str(args.url), timeout: "", key: "", wait: "" };
-    case "read_file":
-      return { main: str(args.path), timeout: "", key: "", wait: "" };
     // AI-39, AI-40: Edit changes the text the call writes; the diff follows.
     case "edit_file":
       return { main: str(args.new_string), timeout: "", key: "", wait: "" };
@@ -947,9 +944,6 @@ function argsFrom(kind: ToolKind, base: Record<string, unknown>, d: Draft): { js
       return { json: JSON.stringify(without({ ...base, text: d.main, key: d.key || undefined, wait_seconds: num(d.wait) })) };
     case "fetch_url":
       return { json: JSON.stringify({ ...base, url: d.main.trim() }) };
-    case "read_file":
-      // A path can start or end with spaces: it goes as typed.
-      return { json: JSON.stringify({ ...base, path: d.main }) };
     case "edit_file":
       return { json: JSON.stringify({ ...base, new_string: d.main }) };
     case "write_file":
@@ -1031,22 +1025,75 @@ function ShownInput({ text, command }: { text: string; command?: boolean }) {
   );
 }
 
+interface AllowLabels {
+  here: string;
+  hereHint: string;
+  /**
+   * Null for an MCP server set to Always ask in bypass mode, which asks anyway, and for commands that
+   * Always allow does not save (`savablePrefixes`).
+   */
+  always: string | null;
+  alwaysHint: string;
+}
+
+/** The labels of a card's Allow for this conversation and Always allow (AI-19, AI-31), which name what they cover. */
+function allowLabels(t: ReturnType<typeof useT>, scope: Scope, tool: string, mcp: McpToolInfo | null, bypass: boolean): AllowLabels {
+  switch (scope.kind) {
+    case "command": {
+      const prefix = scope.prefixes.join(", ");
+      return {
+        here: t("ai.approval.allowCommandHere", { prefix }),
+        hereHint: t("ai.approval.allowCommandHereHint", { prefix }),
+        // Interpreters, deleting and the like are allowed for the conversation only (`savablePrefixes`).
+        always: scope.savable ? t("ai.approval.alwaysAllowCommand", { prefix }) : null,
+        alwaysHint: t("ai.approval.alwaysAllowCommandHint", { prefix }),
+      };
+    }
+    case "domain": {
+      const { domain } = scope;
+      return {
+        here: t("ai.approval.allowDomainHere", { domain }),
+        hereHint: t("ai.approval.allowDomainHereHint", { domain }),
+        always: t("ai.approval.alwaysAllowDomain", { domain }),
+        alwaysHint: t("ai.approval.alwaysAllowDomainHint", { domain }),
+      };
+    }
+    case "tool":
+      return {
+        here: t("ai.approval.allowHere"),
+        hereHint: t("ai.approval.allowHereHint", { tool }),
+        always: t("ai.approval.alwaysAllowHost"),
+        alwaysHint: t("ai.approval.alwaysAllowHostHint", { tool }),
+      };
+    case "mcp":
+      return {
+        here: t("ai.approval.allowHere"),
+        hereHint: t("ai.approval.allowHereHint", { tool }),
+        always: mcp && !(bypass && mcp.always_ask) ? t("ai.approval.alwaysAllow") : null,
+        alwaysHint: t("ai.approval.alwaysAllowHint", { tool }),
+      };
+  }
+}
+
 /**
  * AI-17: the tool, the tab's host, and the full input, with Run, Edit and Reject. An MCP call (AI-31)
- * shows its server, the tool's description and hints in place of the host, and offers Always allow.
- * Allow for this conversation (AI-19) is on every card.
+ * shows its server, the tool's description and hints in place of the host. Allow for this conversation
+ * and Always allow (AI-19) name what they cover: a command's prefixes, a page's domain, or the tool. A
+ * `call_mcp_tool` call (AI-45) shows, and edits, the tool it names and that tool's own arguments.
  */
 function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToolCall; host: HostInfo | null; mcp: McpToolInfo | null }) {
   const t = useT();
-  const kind = toolKind(call.name);
-  const args = useMemo(() => parseArgs(call.arguments) ?? {}, [call.arguments]);
+  const shown = useMemo(() => shownCall(call), [call]);
+  const proxied = proxyCall(call.name, call.arguments) !== null;
+  const kind = toolKind(shown.name);
+  const args = useMemo(() => parseArgs(shown.arguments) ?? {}, [shown.arguments]);
   const [mode, setMode] = useState<"view" | "edit" | "reject">("view");
-  const [draft, setDraft] = useState<Draft>(() => draftFrom(kind, args, call.arguments));
+  const [draft, setDraft] = useState<Draft>(() => draftFrom(kind, args, shown.arguments));
   const [reason, setReason] = useState("");
   const [invalid, setInvalid] = useState(false);
   // AI-42: a side question about the call, which neither runs nor rejects it.
   const [question, setQuestion] = useState<string | null>(null);
-  const label = mcp ? t("ai.tool.mcp", { server: mcp.server_name, tool: mcp.tool.tool }) : toolLabel(t, call.name);
+  const label = mcp ? t("ai.tool.mcp", { server: mcp.server_name, tool: mcp.tool.tool }) : toolLabel(t, shown.name);
   const bypass = useAi((st) => st.slots[slotId]?.mode === "bypass");
   // AI-39, AI-40: an edit or write shows its diff, which follows the text changed in Edit.
   const fileChange = kind === "edit_file" || kind === "write_file";
@@ -1062,13 +1109,22 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
   // file that comes back meanwhile is not written without a diff; without any answer, it waits.
   const holdRun = fileChange && (file.loading || !file.preview);
   const refusal = fileChange ? (file.preview?.error ?? undefined) : undefined;
+  // AI-19: what Allow for this conversation and Always allow cover, for the input that would run; nothing
+  // when the card shows why an edit or write cannot apply, since it showed no change.
+  let allow: AllowLabels | null = null;
+  if (refusal === undefined) {
+    const next = mode === "edit" ? argsFrom(kind, args, draft) : null;
+    const scope = allowanceScope(kind, next && "json" in next ? (parseArgs(next.json) ?? args) : args, mcp);
+    allow = scope && allowLabels(t, scope, label, mcp, bypass);
+  }
   const run = (allow?: Extract<Decision, { kind: "run" }>["allow"]) => {
     if (holdRun) return;
     if (mode !== "edit") return decideCall(slotId, { kind: "run", edited: null, allow, refusal });
     const next = argsFrom(kind, args, draft);
     if ("error" in next) return setInvalid(true);
     const same = next.json === JSON.stringify(args);
-    decideCall(slotId, { kind: "run", edited: same ? null : next.json, allow, refusal });
+    const edited = proxied ? proxyArguments(call.arguments, next.json) : next.json;
+    decideCall(slotId, { kind: "run", edited: same ? null : edited, allow, refusal });
   };
   const reject = () => decideCall(slotId, { kind: "reject", reason: reason.trim() });
   const ask = () => {
@@ -1120,11 +1176,11 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
             }
           }}
         >
-          {kind === "fetch_url" || kind === "read_file" ? (
+          {kind === "fetch_url" ? (
             <input
               className={s.input}
               value={draft.main}
-              aria-label={kind === "read_file" ? t("ai.approval.path") : t("ai.approval.url")}
+              aria-label={t("ai.approval.url")}
               spellCheck={false}
               onChange={(e) => setDraft({ ...draft, main: e.target.value })}
               autoFocus
@@ -1160,7 +1216,7 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
           {kind === "run_command" && (
             <label className={s.inline}>
               {t("ai.approval.timeout")}
-              <input className={cx(s.input, s.number)} type="number" min={1} max={600} placeholder="30" value={draft.timeout} onChange={(e) => setDraft({ ...draft, timeout: e.target.value })} />
+              <input className={cx(s.input, s.number)} type="number" min={1} max={600} placeholder="120" value={draft.timeout} onChange={(e) => setDraft({ ...draft, timeout: e.target.value })} />
               {t("ai.approval.seconds")}
             </label>
           )}
@@ -1186,7 +1242,7 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
           {kind === "run_command" && (
             <>
               <ShownInput text={str(args.command)} command />
-              <div className={s.meta}>{t("ai.approval.timeoutValue", { s: str(args.timeout_seconds) || 30 })}</div>
+              <div className={s.meta}>{t("ai.approval.timeoutValue", { s: str(args.timeout_seconds) || 120 })}</div>
             </>
           )}
           {kind === "send_input" && (
@@ -1205,21 +1261,11 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
               {args.offset !== undefined && <div className={s.meta}>{t("ai.approval.offset", { n: str(args.offset) })}</div>}
             </>
           )}
-          {kind === "read_file" && (
-            <>
-              <ShownInput text={str(args.path)} command />
-              <div className={s.meta}>
-                {[t("ai.approval.fromLine", { n: str(args.offset) || 1 }), args.limit !== undefined && args.limit !== null ? t("ai.approval.maxLines", { n: str(args.limit) }) : ""]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </div>
-            </>
-          )}
           {fileChange && <FileChange state={file} replaceAll={args.replace_all === true} />}
-          {kind !== "run_command" && kind !== "send_input" && kind !== "fetch_url" && kind !== "read_file" && !fileChange && (
+          {kind !== "run_command" && kind !== "send_input" && kind !== "fetch_url" && !fileChange && (
             <>
               {mcp && <div className={s.label}>{t("ai.approval.arguments")}</div>}
-              <ShownInput text={prettyArgs(call.arguments) || "{}"} />
+              <ShownInput text={prettyArgs(shown.arguments) || "{}"} />
             </>
           )}
         </div>
@@ -1310,21 +1356,15 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
           </Button>
         </div>
       )}
-      {mode !== "reject" && offersAllowHere(kind, mcp, refusal) && (
+      {mode !== "reject" && allow && (
         <div className={s.allowRow}>
-          <LinkButton
-            tone="muted"
-            icon="chat-circle-dots"
-            title={t("ai.approval.allowHereHint", { tool: label })}
-            disabled={holdRun}
-            onClick={() => run("conversation")}
-          >
-            {t("ai.approval.allowHere")}
+          <LinkButton tone="muted" icon="chat-circle-dots" title={allow.hereHint} disabled={holdRun} onClick={() => run("conversation")}>
+            {allow.here}
           </LinkButton>
-          {/* Always allow covers manual mode; a server set to Always ask still asks in bypass mode. */}
-          {mcp && !(bypass && mcp.always_ask) && (
-            <LinkButton tone="muted" icon="check-circle" title={t("ai.approval.alwaysAllowHint", { tool: label })} onClick={() => run("always")}>
-              {t("ai.approval.alwaysAllow")}
+          {/* Always allow covers manual mode; an MCP server set to Always ask still asks in bypass mode. */}
+          {allow.always && (
+            <LinkButton tone="muted" icon="check-circle" title={allow.alwaysHint} disabled={holdRun} onClick={() => run("always")}>
+              {allow.always}
             </LinkButton>
           )}
         </div>
@@ -1339,6 +1379,8 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
 function TurnStatus({ slotId, slot }: { slotId: string; slot: Slot }) {
   const t = useT();
   const { turn, outcome } = slot;
+  // AI-45: a message waits for the MCP servers its requests use before it is stored.
+  const mcpStarting = useMcp((st) => Object.values(st.status).some((x) => x.state === "starting" && !slot.mcpOff.includes(x.server_id)));
 
   if (slot.remoteRunning)
     return (
@@ -1352,7 +1394,8 @@ function TurnStatus({ slotId, slot }: { slotId: string; slot: Slot }) {
     // A streaming response shows itself (its reasoning header says it is thinking), and so does a call.
     if (live && (live.text || live.reasoning || live.toolCalls.length > 0)) return null;
     if (turn.call) return null;
-    const key: MessageKey = turn.phase === "tools" ? "ai.status.working" : "ai.status.waiting";
+    const key: MessageKey =
+      turn.phase === "tools" ? "ai.status.working" : turn.phase === "starting" && mcpStarting ? "ai.status.mcpStarting" : "ai.status.waiting";
     return (
       <div className={s.status}>
         <Spinner size={13} />
@@ -1368,6 +1411,11 @@ function TurnStatus({ slotId, slot }: { slotId: string; slot: Slot }) {
       </div>
     );
   if (!outcome) return null;
+  const retry = slot.conversationId ? (
+    <Button size="sm" icon="arrows-clockwise" onClick={() => void retryTurn(slotId)}>
+      {t("btn.retry")}
+    </Button>
+  ) : null;
   switch (outcome.reason) {
     case "stopped":
       return (
@@ -1380,6 +1428,8 @@ function TurnStatus({ slotId, slot }: { slotId: string; slot: Slot }) {
       return <Banner icon="scissors" tone="warn" text={t("ai.outcome.length")} />;
     case "refused":
       return <Banner icon="prohibit" tone="warn" text={t("ai.outcome.refused")} />;
+    case "empty":
+      return <Banner icon="chat-circle-slash" tone="warn" text={t("ai.outcome.empty")} action={retry} />;
     case "error":
       return (
         <Banner
@@ -1387,13 +1437,7 @@ function TurnStatus({ slotId, slot }: { slotId: string; slot: Slot }) {
           tone="error"
           text={outcome.status ? t("ai.outcome.errorStatus", { status: outcome.status }) : t("ai.outcome.error")}
           detail={outcome.message}
-          action={
-            slot.conversationId ? (
-              <Button size="sm" icon="arrows-clockwise" onClick={() => void retryTurn(slotId)}>
-                {t("btn.retry")}
-              </Button>
-            ) : null
-          }
+          action={retry}
         />
       );
   }

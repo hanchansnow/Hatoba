@@ -232,6 +232,7 @@ pub async fn deploy_setup(
     handle: String,
     password: String,
 ) -> AppResult<()> {
+    let _operation = state.lifecycle_operation()?;
     let deployment = state.deploy.get(&handle)?;
     let mut deployment = deployment.lock().await;
     let deployed = deployment

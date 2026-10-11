@@ -1,6 +1,7 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { Button, Icon, TextField } from "@/components/controls";
 import { Dialog, Menu, confirm, toast, useMenu } from "@/components/overlay";
+import { syncNeedsAttention } from "@/features/sync/status";
 import { openExternal } from "@/features/sync/external";
 import { formatRelative, useT } from "@/i18n";
 import { api } from "@/ipc/api";
@@ -37,7 +38,7 @@ function pageKey(page: Page): Key | null {
 
 export function Sidebar() {
   const t = useT();
-  const { page, navigate, info, sync, icloudBackup, lock, openSettings } = useApp();
+  const { page, navigate, info, sync, icloudBackup, backupSaving, lock, openSettings } = useApp();
   const updateAvailable = useUpdate(selectUpdateAvailable);
   const settingsLabel = updateAvailable ? t("sidebar.settingsUpdate") : t("sidebar.settings");
   const activateHome = () => useTabs.getState().activate("home");
@@ -151,7 +152,7 @@ export function Sidebar() {
 
       <StarPrompt />
       <div className={st.footer}>
-        <SyncFooter status={sync} backup={info.platform === "macos" ? icloudBackup : null} onClick={() => go({ kind: "sync" })} />
+        <SyncFooter status={sync} backup={info.platform === "macos" ? icloudBackup : null} saving={backupSaving} onClick={() => go({ kind: "sync" })} />
         <button type="button" className={st.footerButton} title={t("sidebar.lock")} aria-label={t("sidebar.lock")} onClick={() => void lock()}>
           <Icon name="lock-simple" />
         </button>
@@ -255,9 +256,9 @@ function StarPrompt() {
   );
 }
 
-function SyncFooter({ status, backup, onClick }: { status: SyncStatus | null; backup: ICloudBackupStatus | null; onClick: () => void }) {
+function SyncFooter({ status, backup, saving, onClick }: { status: SyncStatus | null; backup: ICloudBackupStatus | null; saving: boolean; onClick: () => void }) {
   const t = useT();
-  const view = syncFooterView(t, status, backup);
+  const view = syncFooterView(t, status, backup, saving);
   return (
     <button type="button" className={st.syncButton} onClick={onClick}>
       <Icon name={view.icon} className={cx(st.syncIcon, view.spin && st.spin)} color={view.color} />
@@ -269,15 +270,24 @@ function SyncFooter({ status, backup, onClick }: { status: SyncStatus | null; ba
   );
 }
 
-export function syncFooterView(t: ReturnType<typeof useT>, s: SyncStatus | null, backup?: ICloudBackupStatus | null) {
-  if (backup?.enabled) {
-    const sub = t("backup.footer.synced_sub", { time: backup.last_at ? formatRelative(t.locale, backup.last_at) : t("time.never") });
+export function syncFooterView(t: ReturnType<typeof useT>, s: SyncStatus | null, backup?: ICloudBackupStatus | null, saving = false) {
+  if (backup?.enabled && !syncNeedsAttention(s)) {
+    const sub = t("backup.footer.synced_sub", { time: backup.last_uploaded_at ? formatRelative(t.locale, backup.last_uploaded_at) : t("time.never") });
+    if (saving) return { icon: "arrows-clockwise", color: "var(--accent)", title: t("backup.saving"), sub, spin: true };
     if (backup.error || ["error", "timeout"].includes(backup.entries[0]?.transfer ?? ""))
       return { icon: "cloud-warning", color: "var(--red)", title: t("sync.footer.error"), sub, spin: false };
+    const latest = backup.entries[0];
+    if (!latest) return { icon: "cloud", color: "var(--fg2)", title: t("backup.never"), sub: "iCloud", spin: false };
+    if (latest.transfer !== "uploaded") return { icon: latest.transfer === "uploading" ? "arrows-clockwise" : "clock", color: "var(--accent)",
+      title: t(latest.transfer === "uploading" ? "backup.uploading" : latest.transfer === "pending" ? "backup.pending" : "backup.unknown"), sub, spin: latest.transfer === "uploading" };
     return { icon: "cloud-check", color: "var(--green)", title: t("sync.footer.synced"), sub, spin: false };
   }
   if (!s || s.kind === "none")
     return { icon: "cloud", color: "var(--fg2)", title: t("sync.footer.none"), sub: t("sync.footer.none_sub"), spin: false };
+  if (s.too_large.length > 0 && !["auth_failed", "offline", "error", "paused"].includes(s.state))
+    return { icon: "cloud-warning", color: "var(--orange)", title: t("sync.footer.error"), sub: t("sync.footer.error_sub"), spin: false };
+  if (s.conflicts > 0 && !["auth_failed", "offline", "error", "paused"].includes(s.state))
+    return { icon: "warning-circle", color: "var(--orange)", title: t("sync.footer.conflict", { n: s.conflicts }), sub: t("sync.footer.conflict_sub"), spin: false };
   switch (s.state) {
     case "syncing":
       return {

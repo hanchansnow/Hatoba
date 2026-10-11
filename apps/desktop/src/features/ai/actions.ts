@@ -46,6 +46,7 @@ import {
   type PasteAttachment,
   type SelectionAttachment,
 } from "./attachments";
+import { addAllowances, hostRefOf, resetAllowances, savedAllowances } from "./allowances";
 import { askEditedFiles } from "./EditFiles";
 import { confirmRevert } from "./RevertConfirm";
 import { chosenEffort } from "./effort";
@@ -70,7 +71,23 @@ import {
   type TabSelection,
 } from "./store";
 import { DISCONNECTED, NO_TAB, readTerminal, sendInput } from "./terminalTools";
-import { allowanceOf, grantKey, mcpOffResult, mustAsk, needsSession, toolKind, type ToolKind } from "./tools";
+import {
+  allowanceOf,
+  allowanceScope,
+  CALL_MCP_TOOL,
+  callAllowed,
+  grantKeys,
+  mcpOffResult,
+  mustAsk,
+  needsApproval,
+  needsSession,
+  parseArgs,
+  savedFor,
+  toolKind,
+  type HostRef,
+  type Scope,
+  type ToolKind,
+} from "./tools";
 import {
   editedFiles,
   entriesBefore,
@@ -157,7 +174,8 @@ function withContext(s: Slot, view: AiConversationView): AiConversationView {
 // ───────────────────────── the turn runner ─────────────────────────
 
 /**
- * `allow`: AI-19 Allow for this conversation, or AI-31 Always allow (MCP tools, on this device).
+ * `allow`: AI-19 Allow for this conversation, or Always allow on this device (AI-19, and AI-31 for MCP
+ * tools), for the call's `allowanceScope`.
  * `refusal`: the error the approval card of an `edit_file` or `write_file` call showed in place of a diff
  * (AI-39, AI-40); the call answers with it instead of running, so nothing is written that the user did
  * not see as a diff.
@@ -165,27 +183,23 @@ function withContext(s: Slot, view: AiConversationView): AiConversationView {
 type Decision =
   | { kind: "run"; edited: string | null; allow?: "conversation" | "always"; refusal?: string }
   | { kind: "reject"; reason: string }
-  | { kind: "continue" }
   | { kind: "stop" };
 
-/** AI-19: later calls of the tool in this conversation run without asking until the app quits. `grant` is its `grantKey`. */
-function allowInConversation(convId: string, grant: string) {
+/** AI-19: later calls the grants cover run without asking in this conversation until the app quits. `grants` are `grantKeys`. */
+function allowInConversation(convId: string, grants: string[]) {
   useAi.setState((st) => {
     const list = st.allowed[convId] ?? [];
-    return list.includes(grant) ? {} : { allowed: { ...st.allowed, [convId]: [...list, grant] } };
+    const added = grants.filter((g) => !list.includes(g));
+    return added.length === 0 ? {} : { allowed: { ...st.allowed, [convId]: [...list, ...added] } };
   });
-}
-
-function allowedInConversation(convId: string, grant: string | null): boolean {
-  return grant !== null && (useAi.getState().allowed[convId]?.includes(grant) ?? false);
 }
 
 const runners = new Map<string, TurnRunner>();
 
 /**
  * Drives one turn (§13.1) for the slot it belongs to: applies the streamed events, then handles the
- * tool calls of each response one at a time, in order, applying the permission mode (§13.5) and the
- * tool call limit (AI-18). `read_terminal` and `send_input` run here; other tools run in Rust.
+ * tool calls of each response one at a time, in order, applying the permission mode (§13.5).
+ * `read_terminal` and `send_input` run here; other tools run in Rust.
  */
 class TurnRunner {
   /** The slot the turn's events and state go to; moves with the conversation (Connect to host, AI-09). */
@@ -232,6 +246,16 @@ class TurnRunner {
     return this.disposed;
   }
 
+  /**
+   * Rust registered a new conversation's turn under `convId` before storing its message (AI-45). A stop
+   * names it from now on, so it works while the MCP servers start; one asked for before is sent now.
+   */
+  private opened(convId: string) {
+    if (this.convId) return;
+    this.convId = convId;
+    if (this.stopping) void this.requestStop(convId);
+  }
+
   /** `ai_send` stored the conversation. A stop asked for before that is sent now. */
   started(convId: string) {
     this.convId = convId;
@@ -241,6 +265,10 @@ class TurnRunner {
 
   onEvent = (ev: AiTurnEvent) => {
     if (this.disposed) return;
+    if (ev.kind === "opened") {
+      this.opened(ev.conversation_id);
+      return;
+    }
     // After the end (e.g. the fallback below), only stored entries still matter.
     if (this.ended) {
       if (ev.kind === "entry") this.addEntry(ev.entry);
@@ -313,10 +341,6 @@ class TurnRunner {
     return new Promise((resolve) => (this.waiter = resolve));
   }
 
-  private countCall() {
-    patchSlot(this.slotId, (s) => (s.turn ? { turn: { ...s.turn, toolCount: s.turn.toolCount + 1 } } : {}));
-  }
-
   private addEntry(entry: AiEntryView) {
     if (!this.disposed) applyEvent(this.slotId, { kind: "entry", entry });
   }
@@ -338,67 +362,77 @@ class TurnRunner {
   }
 
   private async handleCall(convId: string, call: AiToolCall) {
-    // AI-18: pause after the limit until the user chooses Continue.
-    const limit = Math.max(1, useApp.getState().prefs.ai_tool_call_limit || 25);
-    if ((getSlot(this.slotId).turn?.toolCount ?? 0) >= limit) {
-      const d = await this.wait(call.id, "limit");
-      if (d.kind !== "continue" || !this.acting) return;
-      patchSlot(this.slotId, (s) => (s.turn ? { turn: { ...s.turn, toolCount: 0 } } : {}));
-    }
-
     const kind = toolKind(call.name);
     // AI-09: with no terminal tab, a terminal tool cannot run, so it gets its error without asking first.
     if (needsSession(kind) && !this.target()) return this.answer(convId, call.id, NO_TAB);
     // AI-31: an MCP call's tool, resolved the way Rust runs the call; its Always allow and its server's
-    // Always ask decide whether it asks.
+    // Always ask decide whether it asks. A `call_mcp_tool` call (AI-45) counts as the tool it names.
     let mcp: McpToolInfo | null = null;
     if (kind === "mcp") {
-      mcp = await api.mcp_tool_info(convId, call.name).catch(() => null);
+      if (call.name === CALL_MCP_TOOL) {
+        const proxy = await api.mcp_proxy_info(convId, call.arguments).catch(() => null);
+        if (!this.acting) return;
+        // Nothing would run (arguments that do not match the tool's schema, a tool the conversation does
+        // not have, a deleted server): Rust answers it with that error, without asking.
+        if (proxy && !proxy.runs) {
+          this.setCall({ id: call.id, state: "running" });
+          await this.execute(convId, call, kind, null);
+          return;
+        }
+        mcp = proxy?.tool ?? null;
+      } else {
+        mcp = await api.mcp_tool_info(convId, call.name).catch(() => null);
+      }
       if (!this.acting) return;
       // AI-30: a server switched off in the tools menu runs nothing more, in this turn too.
       if (mcp && getSlot(this.slotId).mcpOff.includes(mcp.server_id)) return this.answer(convId, call.id, mcpOffResult(mcp.server_name));
     }
-    const grant = grantKey(kind, call.name, mcp);
-    const allowedHere = allowedInConversation(convId, grant);
+    // AI-19: the approvals the user chose for this conversation and saved on this device, which name the
+    // tab's host for commands and tools; and §13.5's commands that only read.
+    const target = this.target();
+    const host = target ? hostRefOf(target.tab) : null;
+    const mode = getSlot(this.slotId).mode;
+    const saved = kind !== "mcp" && needsApproval(kind, mode) ? await savedAllowances().catch(() => []) : [];
+    if (!this.acting) return;
+    const allowed = callAllowed(kind, parseArgs(call.arguments) ?? {}, mcp, useAi.getState().allowed[convId] ?? [], saved, host);
     let edited: string | null = null;
-    if (mustAsk({ kind, mode: getSlot(this.slotId).mode, allowedHere, mcp })) {
+    if (mustAsk({ kind, mode, allowed, mcp })) {
       const d = await this.wait(call.id, "approval", mcp);
-      if (!this.acting || d.kind === "stop" || d.kind === "continue") return;
+      if (!this.acting || d.kind === "stop") return;
       if (d.kind === "reject") {
         this.setCall({ id: call.id, state: "running" });
         await this.report(convId, call.id, { status: "rejected", content: d.reason, edited_arguments: null });
-        this.countCall();
         return;
       }
       edited = d.edited;
       const allow = allowanceOf(d);
-      if (allow === "conversation" && grant) allowInConversation(convId, grant);
-      else if (allow === "always" && mcp) await this.alwaysAllow(mcp);
+      // What the card offered, for the input that runs: an edited command names its own prefixes.
+      const scope = allow ? allowanceScope(kind, parseArgs(edited ?? call.arguments) ?? {}, mcp) : null;
+      if (allow === "conversation" && scope) allowInConversation(convId, grantKeys(scope));
+      else if (allow === "always" && scope) await this.alwaysAllow(scope, host, mcp);
       if (d.refusal !== undefined) {
         if (!this.acting) return;
         this.setCall({ id: call.id, state: "running" });
         await this.report(convId, call.id, { status: "error", content: d.refusal, edited_arguments: edited });
-        this.countCall();
         return;
       }
     }
     if (!this.acting) return;
     this.setCall({ id: call.id, state: "running" });
     await this.execute(convId, call, kind, edited);
-    this.countCall();
   }
 
   /** Answers a call with an error result, without asking or running it. */
   private async answer(convId: string, callId: string, content: string) {
     this.setCall({ id: callId, state: "running" });
     await this.report(convId, callId, { status: "error", content, edited_arguments: null });
-    this.countCall();
   }
 
-  /** AI-31 Always allow on the card: stored on this device, then the call runs. */
-  private async alwaysAllow(mcp: McpToolInfo) {
+  /** Always allow on the card (AI-19, AI-31): stored on this device, then the call runs. */
+  private async alwaysAllow(scope: Scope, host: HostRef | null, mcp: McpToolInfo | null) {
     try {
-      await api.mcp_set_always_allow(mcp.server_id, mcp.tool.tool, true);
+      if (scope.kind === "mcp" && mcp) await api.mcp_set_always_allow(mcp.server_id, mcp.tool.tool, true);
+      else await addAllowances(savedFor(scope, host));
     } catch (e) {
       // The user approved this call, so it runs; only the setting failed.
       toast(aiErrorMessage(e), "error");
@@ -538,7 +572,8 @@ export async function sendMessage(slotId: string, raw: string): Promise<boolean>
       extras: [...extras, ...s.extras],
     }));
     restore();
-    // Stopped before it was stored (during its compaction, AI-22): the message is back in the input.
+    // Stopped before it was stored, while the MCP servers started (AI-45) or the context was compacted
+    // (AI-22): nothing was stored, a new conversation was not created, and the message is back in the input.
     if (toAppError(e).code !== "cancelled") toast(aiErrorMessage(e), "error");
     return false;
   }
@@ -666,7 +701,7 @@ function discardSideQuestion(slotId: string) {
   patchSlot(slotId, { side: null });
 }
 
-/** Provider error → Retry (§9): the next request from the stored conversation. */
+/** Provider error or a reply without an answer → Retry (§9, §13.1): the next request from the stored conversation. */
 export async function retryTurn(slotId: string) {
   const slot = getSlot(slotId);
   const id = slot.conversationId;
@@ -701,8 +736,8 @@ function settleFailedStart(convId: string, patch: Partial<Slot> = {}): string | 
 
 /**
  * AI-26: replaces an earlier message of the user with `raw`, deletes every entry after it, and starts
- * a turn. Asks first when entries follow it, and offers to revert the file changes of the calls it
- * deletes that this device keeps (AI-41). Not while a turn runs.
+ * a turn. First offers to revert the file changes of the calls it deletes that this device keeps
+ * (AI-41). Not while a turn runs.
  */
 export async function editAndResend(slotId: string, entryId: string, raw: string): Promise<boolean> {
   const text = raw.trim();
@@ -737,14 +772,6 @@ export async function editAndResend(slotId: string, entryId: string, raw: string
       diff: (change) => fileChangeDiff(slotId, change).catch(() => null),
     });
     if (!send) return false;
-  } else if (later > 0) {
-    const ok = await confirm({
-      title: t("ai.edit.confirmTitle"),
-      body: t("ai.edit.confirmBody", { n: later }),
-      confirmLabel: t("ai.edit.confirm"),
-      danger: true,
-    });
-    if (!ok) return false;
   }
   const now = getSlot(slotId);
   if (now.conversationId !== id || now.turn || now.remoteRunning || now.compacting) return false;
@@ -772,8 +799,9 @@ export async function editAndResend(slotId: string, entryId: string, raw: string
     runner.dispose();
     const target = settleFailedStart(id, { entries: now.entries });
     if (target) {
-      // Stopped before it was stored (during its compaction, AI-22): the message and what followed it
-      // are deleted already, so the edited text goes back into the input instead of being lost.
+      // Stopped before it was stored: while the MCP servers started (AI-45), which leaves the message
+      // and what followed it, or during its compaction (AI-22), which has deleted them. Either way the
+      // edited text goes back into the input instead of being lost.
       if (toAppError(e).code === "cancelled") restoreDraft(target, text);
       void reloadSlot(target);
     }
@@ -911,7 +939,7 @@ async function revertChange(slotId: string, convId: string, change: AiFileChange
   }
 }
 
-/** The user's answer to an approval card (AI-17) or the tool call limit (AI-18). */
+/** The user's answer to an approval card (AI-17). */
 export function decideCall(slotId: string, decision: Decision) {
   runners.get(slotId)?.decide(decision);
 }
@@ -1080,6 +1108,7 @@ export function detachSlot(slotId: string) {
 export function resetForLock() {
   for (const runner of [...runners.values()]) runner.dispose();
   runners.clear();
+  resetAllowances();
   useAi.setState((st) => ({
     history: null,
     slots: Object.fromEntries(

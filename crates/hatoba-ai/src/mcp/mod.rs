@@ -6,6 +6,8 @@
 //! - [`McpConnection`]: one session with one server: start the child or open the HTTP session,
 //!   list and call its tools, and shut it down (AI-32).
 //! - [`tool_names`] and [`clean_schema`]: what a request offers the model (AI-30).
+//! - [`deferred`]: `search_tools`, `call_mcp_tool` and the `mcp_tools` note of a conversation
+//!   whose MCP tools are deferred (AI-45).
 //! - [`config`]: import and export in the `mcpServers` format (AI-33).
 //!
 //! Nothing here logs an environment or header value, a tool's arguments or result, or a server's
@@ -19,6 +21,7 @@ use zeroize::Zeroizing;
 
 mod client;
 pub mod config;
+pub mod deferred;
 mod names;
 mod schema;
 mod stdio;
@@ -48,7 +51,7 @@ pub enum McpTransportConfig {
     },
     /// A Streamable HTTP endpoint.
     Http {
-        /// Endpoint URL: `https`, or `http` for loopback and private network addresses.
+        /// Endpoint URL: `http` or `https`.
         url: String,
         /// Headers sent with every request (values are secrets).
         headers: Vec<(String, Zeroizing<String>)>,
@@ -175,7 +178,7 @@ pub enum McpError {
     /// The caller's cancellation token fired.
     #[error("cancelled")]
     Cancelled,
-    /// The server URL is malformed or not allowed (`http` only for local addresses).
+    /// The server URL is malformed, or not an `http` or `https` URL.
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
     /// The configuration cannot be used: an empty command, a header or variable name or value that

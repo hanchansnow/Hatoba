@@ -12,6 +12,8 @@ type Check<T extends true> = T;
 /** Rust → UI: command results and events. */
 export type ResponsesMatch = [
   Check<Assignable<Rust.ICloudBackupStatus, Ui.ICloudBackupStatus>>,
+  Check<Assignable<Ui.ICloudBackupStatus, Rust.ICloudBackupStatus>>,
+  Check<Assignable<Rust.ICloudBackupDevice, Ui.ICloudBackupDevice>>,
   Check<Assignable<Rust.ICloudBackupEntry, Ui.ICloudBackupEntry>>,
   Check<Assignable<Rust.AppError, Ui.AppError>>,
   Check<Assignable<Rust.AppInfo, Ui.AppInfo>>,
@@ -83,7 +85,9 @@ export type ResponsesMatch = [
   Check<Assignable<Rust.McpServerStatus, Ui.McpServerStatus>>,
   Check<Assignable<Rust.McpServerStatus, Ui.EventMap["ai://mcp-status"]>>,
   Check<Assignable<Rust.McpToolInfo, Ui.McpToolInfo>>,
+  Check<Assignable<Rust.McpProxyInfo, Ui.McpProxyInfo>>,
   Check<Assignable<Rust.McpImportPreview, Ui.McpImportPreview>>,
+  Check<Assignable<Rust.AiAllowance, Ui.AiAllowance>>,
 ];
 
 /** UI → Rust: command arguments. */
@@ -113,4 +117,5 @@ export type InputsMatch = [
   Check<Assignable<Ui.McpServerInput, Rust.McpServerInput>>,
   Check<Assignable<Ui.McpTransportInput, Rust.McpTransportInput>>,
   Check<Assignable<Ui.McpSecretInput, Rust.McpSecretInput>>,
+  Check<Assignable<Ui.AiAllowance, Rust.AiAllowance>>,
 ];

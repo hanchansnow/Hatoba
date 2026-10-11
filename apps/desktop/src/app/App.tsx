@@ -9,6 +9,7 @@ import { HostsPage } from "@/features/hosts/HostsPage";
 import { KeysPage } from "@/features/keys/KeysPage";
 import { Onboarding } from "@/features/onboarding/Onboarding";
 import { SettingsWindow } from "@/features/settings/SettingsWindow";
+import { RestoreNotice } from "@/features/sync/RestoreNotice";
 import { SyncPage } from "@/features/sync/SyncPage";
 import { SessionDialogs } from "@/features/terminal/SessionDialogs";
 import { TerminalView } from "@/features/terminal/TerminalView";
@@ -31,6 +32,10 @@ import s from "./App.module.css";
 useApp.subscribe((st) => setOverlaysLocked(st.phase === "locked"));
 
 export function App() {
+  return <><AppContent /><RestoreNotice /></>;
+}
+
+function AppContent() {
   const phase = useApp((st) => st.phase);
   const settingsOpen = useApp((st) => st.settingsOpen);
   const hasSessions = useTabs((st) => st.tabs.length > 0);

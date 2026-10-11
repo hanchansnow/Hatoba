@@ -1,17 +1,23 @@
 //! `fetch_url` (AI-15).
 //!
-//! GET only, `http`/`https` only, no cookies, no credentials, no proxy, at most 5 redirects
-//! followed by hand. Every hop is checked: an IP-literal host directly, a host name through a
-//! resolver that refuses names resolving to any non-public address. The connection uses exactly
-//! the addresses the resolver checked, so DNS rebinding between the check and the connection is
-//! not possible. The system proxy is not used, because a proxy resolves names itself and would
-//! defeat the check.
+//! GET only, `http`/`https` only, no cookies, no credentials, at most 5 redirects followed by
+//! hand, through the system proxy when one is set. Redirects are followed only on the host the
+//! call named: a redirect to another host ends the fetch with that URL, so a fetch of it goes
+//! through approval like any other (AI-19), and an allowed domain cannot pass the call on to one
+//! that is not. Every hop is checked: an IP-literal host and
+//! `localhost` directly, and a host name the client resolves itself through a resolver that
+//! refuses names resolving to any non-public address. The connection uses exactly the addresses
+//! the resolver checked, so DNS rebinding between the check and the connection is not possible.
+//! A proxy resolves the names it is sent itself, so behind one the check of a name's addresses is
+//! the proxy's to make; the names the resolver sees that no hop requests are the proxy's own,
+//! which may well be local, and resolve unchecked.
 //!
 //! Text, HTML, JSON and XML are accepted; HTML becomes Markdown. The download is capped at 5 MB
-//! and the whole fetch at 30 s. The result is up to 16,000 characters from `offset`.
+//! and the whole fetch at 90 s. The result is up to 30,000 characters from `offset`.
 
-use std::net::IpAddr;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -27,11 +33,11 @@ use crate::net::{
 };
 
 /// Characters returned per call.
-pub const MAX_FETCH_CHARS: usize = 16_000;
+pub const MAX_FETCH_CHARS: usize = 30_000;
 /// Bytes downloaded at most; the rest of a longer body is left out.
 const MAX_DOWNLOAD_BYTES: usize = 5 * 1024 * 1024;
 /// Overall limit of one fetch, redirects included.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(90);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 5;
 /// DOM depth above which HTML is reduced to text instead of Markdown.
@@ -48,19 +54,23 @@ const REDIRECT_BLOCKED: &str = "the URL redirected to an address on a loopback, 
 pub struct FetchResult {
     /// The final URL, after redirects.
     pub url: String,
+    /// Where `url` redirected to, on another host, which is not followed. The result then has no
+    /// content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<String>,
     /// The media type, e.g. `text/html` (without parameters).
     pub content_type: String,
     /// Character offset of `content`.
     pub offset: u64,
     /// Characters in the whole converted content.
     pub total_length: u64,
-    /// Up to 16,000 characters from `offset`.
+    /// Up to 30,000 characters from `offset`.
     pub content: String,
     /// The body was longer than the 5 MB download limit and was cut.
     pub truncated: bool,
 }
 
-/// Fetches `url` and returns up to 16,000 characters from `offset` (characters, not bytes) of
+/// Fetches `url` and returns up to 30,000 characters from `offset` (characters, not bytes) of
 /// its content, HTML converted to Markdown (AI-15). Refuses non-public addresses at every hop.
 pub async fn fetch_url(
     url: &str,
@@ -74,6 +84,14 @@ pub async fn fetch_url(
 /// range, a line on how to read on when more remains, then the content.
 #[must_use]
 pub fn format_fetch_result(r: &FetchResult) -> String {
+    if let Some(to) = &r.redirect {
+        return format!(
+            "URL: {} | Redirects to another host: {to}\n\
+             fetch_url follows redirects only on the host it was given. To read the page, call \
+             fetch_url with that URL.\n",
+            r.url
+        );
+    }
     let end = r.offset + r.content.chars().count() as u64;
     let mut out = format!(
         "URL: {} | Content type: {} | Characters {}-{} of {}{}\n",
@@ -100,13 +118,34 @@ pub fn format_fetch_result(r: &FetchResult) -> String {
     out
 }
 
-/// `fetch_url` with an injectable address policy and resolver (tests use them to reach the
+/// `fetch_url` with an injectable address policy, resolver and proxy (tests use them to reach the
 /// mock server on 127.0.0.1); [`fetch_url`] always uses [`Fetcher::public`].
 pub(crate) struct Fetcher {
     allowed: fn(IpAddr) -> bool,
     lookup: Lookup,
     max_bytes: usize,
     timeout: Duration,
+    proxy: Proxy,
+}
+
+/// Where a [`Fetcher`] sends its requests.
+pub(crate) enum Proxy {
+    /// Through the system proxy when one is set, else straight to the host.
+    System,
+    /// Straight to the host, whatever proxy the environment sets.
+    #[cfg(test)]
+    None,
+    /// Through the proxy at this URL.
+    #[cfg(test)]
+    At(String),
+}
+
+/// How a fetch ended.
+enum Hop {
+    /// The page.
+    Page(Fetched),
+    /// `at` redirected to `to`, on another host.
+    Elsewhere { at: Url, to: Url },
 }
 
 /// What one successful hop returned.
@@ -125,9 +164,12 @@ impl Fetcher {
             lookup: system_lookup(),
             max_bytes: MAX_DOWNLOAD_BYTES,
             timeout: FETCH_TIMEOUT,
+            proxy: Proxy::System,
         }
     }
 
+    /// A fetcher that connects straight to the host, so the mock server is reached whatever
+    /// proxy the environment sets.
     #[cfg(test)]
     pub(crate) fn for_tests(
         allowed: fn(IpAddr) -> bool,
@@ -140,19 +182,30 @@ impl Fetcher {
             lookup,
             max_bytes,
             timeout,
+            proxy: Proxy::None,
         }
     }
 
-    fn client(&self) -> Result<reqwest::Client, AiError> {
+    /// The client of one fetch. `targets` are the host names its hops request, which the resolver
+    /// holds to the policy.
+    fn client(&self, targets: &Arc<Mutex<HashSet<String>>>) -> Result<reqwest::Client, AiError> {
         net::ensure_crypto_provider();
-        reqwest::Client::builder()
-            .no_proxy()
+        let builder = match &self.proxy {
+            Proxy::System => reqwest::Client::builder(),
+            #[cfg(test)]
+            Proxy::None => reqwest::Client::builder().no_proxy(),
+            #[cfg(test)]
+            Proxy::At(url) => reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(url).map_err(|e| AiError::Network(e.to_string()))?),
+        };
+        builder
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
             .dns_resolver(GuardedResolver {
                 allowed: self.allowed,
                 lookup: Arc::clone(&self.lookup),
                 refusal: refuse_blocked,
+                targets: Arc::clone(targets),
             })
             .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(net::USER_AGENT)
@@ -160,11 +213,14 @@ impl Fetcher {
             .map_err(|_| AiError::Network("could not build the HTTP client".into()))
     }
 
-    /// Refuses an IP-literal host outside the policy (host names go through the resolver).
+    /// Refuses an IP-literal host outside the policy, and `localhost` when the policy refuses
+    /// loopback, by its name, since behind a proxy the resolver never sees it. Other host names go
+    /// through the resolver.
     fn check_host(&self, url: &Url, redirected: bool) -> Result<(), AiError> {
         let ip: IpAddr = match url.host() {
             Some(Host::Ipv4(ip)) => ip.into(),
             Some(Host::Ipv6(ip)) => ip.into(),
+            Some(Host::Domain(name)) if is_localhost(name) => Ipv4Addr::LOCALHOST.into(),
             Some(Host::Domain(_)) => return Ok(()),
             None => return Err(AiError::InvalidUrl("the URL has no host".into())),
         };
@@ -182,10 +238,21 @@ impl Fetcher {
         cancel: &CancellationToken,
     ) -> Result<FetchResult, AiError> {
         let url = parse_url(url)?;
-        let client = self.client()?;
-        let fetched = tokio::time::timeout(self.timeout, self.follow(&client, url, cancel))
+        let targets = Arc::new(Mutex::new(HashSet::new()));
+        let client = self.client(&targets)?;
+        let hop = tokio::time::timeout(self.timeout, self.follow(&client, &targets, url, cancel))
             .await
             .map_err(|_| AiError::Network("fetching the page timed out".into()))??;
+        let fetched = match hop {
+            Hop::Page(fetched) => fetched,
+            Hop::Elsewhere { at, to } => {
+                return Ok(FetchResult {
+                    url: at.to_string(),
+                    redirect: Some(to.to_string()),
+                    ..FetchResult::default()
+                });
+            }
+        };
         let is_html = matches!(
             fetched.media_type.as_str(),
             "text/html" | "application/xhtml+xml"
@@ -212,13 +279,21 @@ impl Fetcher {
     async fn follow(
         &self,
         client: &reqwest::Client,
+        targets: &Mutex<HashSet<String>>,
         mut url: Url,
         cancel: &CancellationToken,
-    ) -> Result<Fetched, AiError> {
+    ) -> Result<Hop, AiError> {
+        let host = url.host().map(|h| h.to_owned());
         let mut redirects = 0;
         loop {
             let redirected = redirects > 0;
             self.check_host(&url, redirected)?;
+            if let Some(Host::Domain(name)) = url.host() {
+                targets
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(name.to_ascii_lowercase());
+            }
             let request = client.get(url.clone()).header(ACCEPT, ACCEPT_VALUE);
             let response = match net::send(request, cancel).await {
                 Err(AiError::Blocked(_)) => return Err(blocked(redirected)),
@@ -246,7 +321,13 @@ impl Fetcher {
                 let next = url
                     .join(location)
                     .map_err(|_| AiError::InvalidUrl("the redirect target is not a URL".into()))?;
-                url = parse_url(next.as_str())?;
+                let next = parse_url(next.as_str())?;
+                if next.host().map(|h| h.to_owned()) != host {
+                    // Refused addresses still fail here, without a request.
+                    self.check_host(&next, true)?;
+                    return Ok(Hop::Elsewhere { at: url, to: next });
+                }
+                url = next;
                 redirects += 1;
                 continue;
             }
@@ -277,15 +358,22 @@ impl Fetcher {
                 )));
             }
             let (body, truncated) = net::read_capped(response, self.max_bytes, cancel).await?;
-            return Ok(Fetched {
+            return Ok(Hop::Page(Fetched {
                 url,
                 media_type,
                 charset,
                 body,
                 truncated,
-            });
+            }));
         }
     }
+}
+
+/// `localhost` and its subdomains, which resolve to loopback (RFC 6761), with or without the
+/// final dot.
+fn is_localhost(name: &str) -> bool {
+    let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
+    name == "localhost" || name.ends_with(".localhost")
 }
 
 fn blocked(redirected: bool) -> AiError {
@@ -439,7 +527,7 @@ fn dom_depth(root: &std::rc::Rc<htmd::Node>) -> usize {
     deepest
 }
 
-/// Up to 16,000 characters of `content` from `offset`.
+/// Up to 30,000 characters of `content` from `offset`.
 fn page(
     url: String,
     content_type: String,
@@ -460,6 +548,7 @@ fn page(
         .map_or(rest.len(), |(i, _)| i);
     FetchResult {
         url,
+        redirect: None,
         content_type,
         offset: start as u64,
         total_length: total as u64,

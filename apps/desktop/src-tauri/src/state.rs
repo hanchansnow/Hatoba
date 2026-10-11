@@ -23,6 +23,8 @@ pub use hatoba_core::sync::SharedVault;
 pub struct AppState {
     pub vault: SharedVault,
     pub backups: crate::backup::Backups,
+    /// Serializes key and connection changes with restore, including awaited work.
+    pub lifecycle: tokio::sync::Mutex<()>,
     pub secrets: Arc<KeyringStore>,
     pub ssh: SshManager,
     pub sync: SyncController,
@@ -47,6 +49,7 @@ impl AppState {
         Self {
             vault: Arc::new(Mutex::new(vault)),
             backups: crate::backup::Backups::default(),
+            lifecycle: tokio::sync::Mutex::new(()),
             secrets: Arc::new(KeyringStore),
             ssh: SshManager::default(),
             sync: SyncController::default(),
@@ -59,6 +62,13 @@ impl AppState {
             lock_policy: LockPolicy::default(),
             last_activity: Mutex::new(Instant::now()),
         }
+    }
+
+    /// Rejects concurrent lifecycle requests rather than queueing an old password/key request.
+    pub fn lifecycle_operation(&self) -> AppResult<tokio::sync::MutexGuard<'_, ()>> {
+        self.lifecycle
+            .try_lock()
+            .map_err(|_| AppError::invalid("vault", "A vault operation is already in progress"))
     }
 
     /// Locks the vault mutex. Poisoning only happens after a panic while holding it; the vault's
@@ -106,4 +116,60 @@ pub async fn blocking<R: Send + 'static>(
     tauri::async_runtime::spawn_blocking(f)
         .await
         .map_err(|e| AppError::internal(format!("background task failed: {e}")))?
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[tokio::test]
+    async fn restore_excludes_unlock_and_connection_changes_through_awaited_safety_work() {
+        let mut vault = Vault::open_in_memory().unwrap();
+        let recovery = vault
+            .create_with_params(
+                "original-vault-password",
+                hatoba_core::KdfParams::for_tests(),
+            )
+            .unwrap()
+            .to_string();
+        let original_id = vault.device_id();
+        let old_key = vault.vault_key_copy().unwrap();
+        let state = Arc::new(AppState::new(vault, false));
+        let restore = state.lifecycle_operation().unwrap();
+        state.vault().lock();
+        // Restore is paused here while its encrypted safety write awaits. Each request would
+        // unlock the old vault and call after_unlock if the lifecycle guard were absent.
+        let password = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let _guard = state.lifecycle_operation()?;
+                state.vault().unlock("original-vault-password")?;
+                Ok::<_, AppError>(())
+            })
+        };
+        let biometric = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let _guard = state.lifecycle_operation()?;
+                state.vault().unlock_with_vault_key(old_key)?;
+                Ok::<_, AppError>(())
+            })
+        };
+        let recovery = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let _guard = state.lifecycle_operation()?;
+                state.vault().recover(&recovery, "replacement-password")?;
+                Ok::<_, AppError>(())
+            })
+        };
+        assert!(password.await.unwrap().is_err());
+        assert!(biometric.await.unwrap().is_err());
+        assert!(recovery.await.unwrap().is_err());
+        assert!(!state.vault().is_unlocked());
+        assert_eq!(state.vault().device_id(), original_id);
+        drop(restore); // The safety write failed: recovery using the original password is possible.
+        let _guard = state.lifecycle_operation().unwrap();
+        state.vault().unlock("original-vault-password").unwrap();
+        assert!(state.vault().is_unlocked());
+    }
 }

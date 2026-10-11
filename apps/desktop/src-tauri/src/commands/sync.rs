@@ -147,6 +147,7 @@ pub async fn sync_configure(
     config: SyncConfigInput,
     password: String,
 ) -> AppResult<()> {
+    let _operation = state.lifecycle_operation()?;
     let (cfg, backend) = backend_from_input(&config)?;
     let setup_token = match &config {
         SyncConfigInput::Worker { setup_token, .. } => setup_token
@@ -184,6 +185,7 @@ pub async fn sync_login(
     state: State<'_, AppState>,
     password: String,
 ) -> AppResult<()> {
+    let _operation = state.lifecycle_operation()?;
     // A disconnect, a lock or another sign-in while this one waits for the server ends the
     // connection it started from, and this sign-in then saves and installs nothing (§6.3).
     let generation = state.sync.generation();
@@ -252,6 +254,7 @@ pub fn sync_set_auto(app: AppHandle, state: State<'_, AppState>, enabled: bool) 
 #[tauri::command]
 #[specta::specta]
 pub async fn sync_disconnect(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let _operation = state.lifecycle_operation()?;
     let round = state.sync.end_connection().await;
     let cleared = [
         clear_session(state.secrets.as_ref()),
@@ -293,6 +296,7 @@ pub async fn sync_revoke_device(
     state: State<'_, AppState>,
     device_id: String,
 ) -> AppResult<()> {
+    let _operation = state.lifecycle_operation()?;
     let backend = state.sync.require_backend()?;
     let current = state.vault().device_id() == device_id;
     flows::revoke_device(backend.as_ref(), &device_id).await?;
@@ -304,7 +308,7 @@ pub async fn sync_revoke_device(
     Ok(())
 }
 
-fn item_type(item: Option<&Item>) -> ItemType {
+pub(crate) fn item_type(item: Option<&Item>) -> ItemType {
     match item {
         Some(Item::Host(_)) | None => ItemType::Host,
         Some(Item::Group(_)) => ItemType::Group,

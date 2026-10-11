@@ -17,6 +17,7 @@ use std::io::{Read as _, Write as _};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::crypto::{AAD_VAULT_KEY, KdfParams, MasterKeys, decode_salt, unwrap_key};
 use crate::error::{Error, Result};
@@ -170,8 +171,28 @@ pub(crate) fn export(store: &Store, path: &Path, now_ms: i64) -> Result<()> {
 pub struct VerifiedBackup {
     file: BackupFile,
     vault_key: crate::crypto::Key32,
-    items: BTreeMap<String, crate::model::Item>,
+    items: DecryptedItems,
 }
+
+/// Owns partial verification results through every fallible restore operation.
+#[derive(Default)]
+struct DecryptedItems(BTreeMap<String, crate::model::Item>);
+impl Zeroize for DecryptedItems {
+    fn zeroize(&mut self) {
+        for item in self.0.values_mut() {
+            item.zeroize();
+        }
+    }
+}
+impl Drop for DecryptedItems {
+    fn drop(&mut self) {
+        self.zeroize();
+        #[cfg(test)]
+        WIPED_ITEMS.with(|count| count.set(count.get() + self.0.len()));
+    }
+}
+#[cfg(test)]
+thread_local! { static WIPED_ITEMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 impl BackupFile {
     /// Checks the password, all item envelopes, unique IDs and recovery authentication material.
@@ -198,7 +219,7 @@ impl BackupFile {
             unwrap_key(&vault_key, crate::crypto::AAD_RECOVERY_AUTH, sealed)?;
         }
         let mut seen = HashSet::new();
-        let mut items = BTreeMap::new();
+        let mut items = DecryptedItems::default();
         for row in &self.items {
             if !(1..=64).contains(&row.id.len())
                 || !row
@@ -217,7 +238,7 @@ impl BackupFile {
                     .ok_or_else(|| Error::Format("missing item envelope".into()))?;
                 let mut item = decode_envelope(&vault_key, &row.id, envelope)?;
                 item.strip_message_data();
-                items.insert(row.id.clone(), item);
+                items.0.insert(row.id.clone(), item);
             }
         }
         Ok(VerifiedBackup {
@@ -255,13 +276,13 @@ impl Vault {
         let VerifiedBackup {
             file,
             vault_key,
-            items,
+            mut items,
         } = verified;
         let check = seal_vault_check(&vault_key)?;
         self.store.transaction(|tx| {
             tx.conn().execute_batch("DELETE FROM items; DELETE FROM local_state; DELETE FROM conflict_log; DELETE FROM ai_file_snapshots;")?;
             for key in [meta::SYNC_BACKEND, meta::SYNC_CURSOR, meta::SYNC_LAST_AT,
-                meta::RECENT_TARGETS, meta::MCP_DEVICE_STATE, meta::RECOVERY_AUTH_SEALED,
+                meta::RECENT_TARGETS, meta::AI_ALLOWANCES, meta::MCP_DEVICE_STATE, meta::RECOVERY_AUTH_SEALED,
                 meta::UNLOCK_FAILURES, meta::UNLOCK_LAST_FAILURE_AT, meta::WORKER_UPDATE_DISMISSED] {
                 tx.delete_meta(key)?;
             }
@@ -275,6 +296,7 @@ impl Vault {
                     backup.remove("last_at");
                     backup.remove("last_checked");
                     backup.remove("last_digest");
+                    backup.remove("last_name");
                 }
                 tx.set_meta(meta::LOCAL_PREFS, &value.to_string())?;
             }
@@ -295,7 +317,7 @@ impl Vault {
             Ok(())
         })?;
         // Every row was decoded before committing; installing the verified map cannot fail.
-        self.install_backup_unlock(vault_key, items);
+        self.install_backup_unlock(vault_key, std::mem::take(&mut items.0));
         Ok(())
     }
 }
@@ -443,5 +465,65 @@ mod tests {
             vault.export_backup(&dir.path().join("b")),
             Err(Error::VaultNotInitialized)
         ));
+    }
+    #[test]
+    fn malformed_later_item_wipes_partial_verification_and_preserves_vault() {
+        let (mut source, _, _) = populated();
+        let mut file = source.backup_snapshot().unwrap();
+        file.items.push(BackupItem {
+            id: "bad-row".into(),
+            envelope: Some("invalid".into()),
+            deleted: false,
+            updated_at: 1,
+        });
+        WIPED_ITEMS.with(|count| count.set(0));
+        assert!(file.verify(PW).is_err());
+        assert!(WIPED_ITEMS.with(|count| count.get()) >= 1);
+        let original = serde_json::to_value(source.backup_snapshot().unwrap()).unwrap();
+        source.lock();
+        source.unlock(PW).unwrap();
+        assert_eq!(
+            original["items"],
+            serde_json::to_value(source.backup_snapshot().unwrap()).unwrap()["items"]
+        );
+    }
+
+    #[test]
+    fn transaction_failure_rolls_back_and_wipes_verified_items() {
+        let (source, _, _) = populated();
+        let (mut destination, host, _) = populated();
+        let original_id = destination.device_id();
+        let original_rows = destination.store.item_rows().unwrap();
+        destination.store.conn().execute_batch("CREATE TRIGGER fail_restore BEFORE INSERT ON items BEGIN SELECT RAISE(ABORT, 'injected restore failure'); END;").unwrap();
+        WIPED_ITEMS.with(|count| count.set(0));
+        let verified = source.backup_snapshot().unwrap().verify(PW).unwrap();
+        assert!(destination.restore_verified_backup(verified, true).is_err());
+        assert!(WIPED_ITEMS.with(|count| count.get()) >= 1);
+        assert_eq!(destination.device_id(), original_id);
+        assert_eq!(destination.store.item_rows().unwrap(), original_rows);
+        assert_eq!(
+            destination.get(&host).unwrap().display_name(),
+            "backup-host-name"
+        );
+    }
+
+    #[test]
+    fn decrypted_owner_wipes_plain_fields_and_transfers_only_after_commit() {
+        let (source, host, _) = populated();
+        let mut verified = source.backup_snapshot().unwrap().verify(PW).unwrap();
+        verified.items.zeroize();
+        assert_eq!(verified.items.0[&host].display_name(), "");
+        drop(verified);
+        WIPED_ITEMS.with(|count| count.set(0));
+        let mut fresh = Vault::open_in_memory().unwrap();
+        fresh
+            .restore_verified_backup(source.backup_snapshot().unwrap().verify(PW).unwrap(), false)
+            .unwrap();
+        assert_eq!(fresh.get(&host).unwrap().display_name(), "backup-host-name");
+        assert_eq!(
+            WIPED_ITEMS.with(|count| count.get()),
+            0,
+            "the successfully installed map was transferred to Unlocked's wiping owner"
+        );
     }
 }

@@ -16,6 +16,7 @@ import type {
   SyncStatus,
   VaultStatus,
 } from "../types";
+import { byteCount, HOST_NOTES_MAX_BYTES } from "@/features/ai/instructions";
 import { ENV_MAX_VARS, envRows, envTooLarge, validateEnvRows } from "@/features/hosts/envVars";
 import { formatTarget, sameTarget } from "@/features/hosts/quickConnect";
 import { defaultRightClick, defaultTerminalFont } from "@/lib/platform";
@@ -43,7 +44,7 @@ const SSH_DEMO_DETAIL: Partial<Record<SshErrorKind, (address: string, port: numb
 /**
  * In-browser stand-in for the Rust backend so the UI can be developed and reviewed with the
  * design's sample data (`pnpm dev`). URL parameters select demo states:
- *   ?state=onboarding | locked | empty      ?sync=none | syncing | offline | conflict | auth
+ *   ?state=onboarding | locked | empty      ?sync=none | syncing | offline | conflict | auth | too_large
  *   ?platform=windows | macos | linux       ?update=available | badsig | dropped | offline | error
  *   ?deploy=fail | waiting | vault | foreign | nosub | accounts | permission | nobundle
  *   ?star=due
@@ -127,6 +128,17 @@ export function createMockApi(): HatobaApi {
     if (syncDemo === "offline") return { ...s, state: "offline", pending: 3 };
     if (syncDemo === "auth") return { ...s, state: "auth_failed" };
     if (syncDemo === "conflict") return { ...s, conflicts: D.CONFLICTS.length };
+    if (syncDemo === "too_large") {
+      const host = D.HOSTS[0];
+      return {
+        ...s,
+        pending: 2,
+        too_large: [
+          { item_id: host.id, item_type: "host", item_name: host.name },
+          { item_id: "settings", item_type: "settings", item_name: "settings" },
+        ],
+      };
+    }
     if (workerDemo === "available") return { ...s, worker_update: { kind: "available", version: "0.1.0", bundled: BUNDLED_WORKER } };
     if (workerDemo === "required" || workerDemo === "custom")
       return {
@@ -150,14 +162,17 @@ export function createMockApi(): HatobaApi {
 
   const backupChecks = new Map<string, number>();
   function backupStatus(retry = false) {
-    return { enabled: backupEnabled, automatic: backupAutomatic, retention: backupRetention, last_at: backupEntries[0]?.created_at ?? null, error: null,
-      entries: backupEntries.map((entry) => {
-        if (entry.transfer === "uploaded") return { ...entry };
-        const checks = retry ? 1 : Math.min(5, (backupChecks.get(entry.name) ?? 0) + 1);
-        backupChecks.set(entry.name, checks);
-        return { ...entry, transfer: checks === 5 ? entry.transfer === "error" ? "error" : "timeout"
-          : entry.transfer === "error" ? "pending" : entry.transfer };
-      }),
+    const entries = backupEntries.map((entry) => {
+      if (entry.transfer === "uploaded") return { ...entry };
+      const checks = retry ? 1 : Math.min(5, (backupChecks.get(entry.name) ?? 0) + 1);
+      backupChecks.set(entry.name, checks);
+      return { ...entry, transfer: checks === 5 ? entry.transfer === "error" ? "error" : "timeout"
+        : entry.transfer === "error" ? "pending" : entry.transfer };
+    });
+    const last_at = entries[0]?.created_at ?? null;
+    const last_uploaded_at = entries.filter((entry) => entry.transfer === "uploaded")[0]?.created_at ?? null;
+    return { enabled: backupEnabled, automatic: backupAutomatic, retention: backupRetention, last_at, last_uploaded_at, error: null, entries,
+      devices: [{ device_id: "demo", name: "Demo Mac", platform: "macOS", current: true, last_at, last_uploaded_at, entries, error: null }],
     };
   }
 
@@ -200,7 +215,7 @@ export function createMockApi(): HatobaApi {
     if (sync.kind === "none") return;
     if (sync.state === "paused") return setSync({ pending: sync.pending + 1 });
     setSync({ state: "syncing", pending: sync.pending + 1 });
-    setTimeout(() => setSync({ state: "idle", pending: 0, last_synced_at: Date.now() }), 900);
+    setTimeout(() => setSync({ state: "idle", pending: 0, last_synced_at: Date.now(), too_large: [] }), 900);
   }
 
   /** The Worker answers with the bundled version: the notice goes, and a paused sync pushes what waited. */
@@ -230,7 +245,7 @@ export function createMockApi(): HatobaApi {
       },
       mcp: { servers: aiExtensions.mcp_servers_list, status: aiExtensions.mcp_server_status, start: aiExtensions.mcp_server_start, toolInfo: aiExtensions.mcp_tool_info },
     }),
-    app_info: async () => ({ version, platform, mica: false }),
+    app_info: async () => ({ version, platform, mica: false, local_user: "demo" }),
     update_check: async () => {
       await delay(800);
       if (updateDemo === "offline") fail("sync_offline", "GitHub could not be reached");
@@ -263,7 +278,7 @@ export function createMockApi(): HatobaApi {
     }),
     vault_create: async (password) => {
       await delay(600);
-      if (password.length < 8) fail("invalid_input", "password too short", { field: "password" });
+      if (password.length < 12) fail("invalid_input", "password too short", { field: "password" });
       vaultState = "unlocked";
       hosts = [];
       groups = [];
@@ -314,14 +329,13 @@ export function createMockApi(): HatobaApi {
       if (retention !== undefined && (!Number.isInteger(retention) || retention < 1 || retention > 4294967295)) fail("invalid_input");
       backupEnabled = enabled; backupAutomatic = automatic;
       if (retention !== undefined) backupRetention = retention;
-      if (enabled) backupEntries.splice(backupRetention);
+      if (enabled && backupEntries[0]?.transfer === "uploaded") backupEntries.splice(backupRetention);
     },
     icloud_backup_now: async () => {
       if (!backupEnabled) fail("invalid_input");
       await delay(300);
       const at = Date.now();
       backupEntries.unshift({ name: `hatoba-demo-${at}.hatoba-backup`, created_at: at, size: 48320, transfer: "pending" });
-      backupEntries.splice(backupRetention);
       return backupStatus();
     },
     icloud_backup_restore: async (_path, password, replace, currentPassword) => {
@@ -359,9 +373,8 @@ export function createMockApi(): HatobaApi {
     },
     host_save: async (input) => {
       needUnlocked();
-      if (!input.name.trim()) fail("invalid_input", "name is required", { field: "name" });
       if (!input.address.trim()) fail("invalid_input", "address is required", { field: "address" });
-      if ([...input.ai_notes].length > 2_000) fail("invalid_input", "AI notes are limited to 2,000 characters", { field: "ai_notes" });
+      if (byteCount(input.ai_notes) > HOST_NOTES_MAX_BYTES) fail("invalid_input", "AI notes are limited to 16 KB", { field: "ai_notes" });
       if (input.proxy_mode === "proxy" && !proxies.some((p) => p.id === input.proxy_id))
         fail("invalid_input", "proxy not found", { field: "proxy_id" });
       const env = input.env.map((v) => ({ name: v.name.trim(), value: v.value }));
@@ -370,7 +383,7 @@ export function createMockApi(): HatobaApi {
       const existing = input.id ? hosts.find((h) => h.id === input.id) : undefined;
       const view: HostView = {
         id: existing?.id ?? id("h"),
-        name: input.name.trim(),
+        name: input.name.trim() || Array.from(input.address.trim()).slice(0, 128).join(""),
         address: input.address.trim(),
         port: input.port || 22,
         username: input.username.trim(),

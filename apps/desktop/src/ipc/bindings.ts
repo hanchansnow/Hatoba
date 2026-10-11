@@ -26,8 +26,8 @@ export const commands = {
 	/**  Feeds the idle auto-lock timer (SEC-02). */
 	activityPing: () => __TAURI_INVOKE<void>("activity_ping"),
 	/**
-	 *  Asks GitHub whether a newer version exists (Settings → About). Runs only when the user
-	 *  checks, or after unlock when they turned on the automatic check.
+	 *  Asks GitHub whether a newer version exists (Settings → About). Runs when the user checks,
+	 *  and once after unlock while the automatic check is on.
 	 */
 	updateCheck: () => __TAURI_INVOKE<UpdateCheck>("update_check"),
 	/**
@@ -70,7 +70,8 @@ export const commands = {
 	hostSetShowStats: (id: string, on: boolean) => __TAURI_INVOKE<null>("host_set_show_stats", { id, on }),
 	/**
 	 *  SEC-08: copies a saved host password to the clipboard from Rust (it never reaches the WebView)
-	 *  and clears it after 30 s if the clipboard still holds it.
+	 *  and clears it after the device's delay (90 s by default; 0 never clears it) if the clipboard
+	 *  still holds it.
 	 */
 	hostCopyPassword: (id: string) => __TAURI_INVOKE<null>("host_copy_password", { id }),
 	groupsList: () => __TAURI_INVOKE<GroupView[]>("groups_list"),
@@ -332,6 +333,12 @@ export const commands = {
 	 *  naming the file by its base name. The per-message total stays the panel's to check.
 	 */
 	aiReadDroppedFiles: (paths: string[]) => __TAURI_INVOKE<DroppedFile[]>("ai_read_dropped_files", { paths }),
+	/**  The AI approvals saved on this device, oldest first. */
+	aiAllowancesList: () => __TAURI_INVOKE<AiAllowance[]>("ai_allowances_list"),
+	/**  Saves an approval on this device and returns them all. */
+	aiAllowanceAdd: (allowance: AiAllowance) => __TAURI_INVOKE<AiAllowance[]>("ai_allowance_add", { allowance }),
+	/**  Removes a saved approval and returns what is left. */
+	aiAllowanceRemove: (allowance: AiAllowance) => __TAURI_INVOKE<AiAllowance[]>("ai_allowance_remove", { allowance }),
 	skillsList: () => __TAURI_INVOKE<SkillView[]>("skills_list"),
 	skillGet: (id: string) => __TAURI_INVOKE<SkillDetail>("skill_get", { id }),
 	/**  The built-in `hatoba` skill (AI-34), with this app's version, for the viewer in Settings. */
@@ -343,11 +350,10 @@ export const commands = {
 	/**  Reads a folder or `.zip` the user picked; nothing is saved. */
 	skillImportPreview: (path: string) => __TAURI_INVOKE<SkillImportPreview>("skill_import_preview", { path }),
 	/**
-	 *  Imports what the preview showed: reads the path again and refuses it when it no longer
-	 *  matches the preview's `token`. `replace_id` replaces that skill; `rename` saves it under a
-	 *  new name.
+	 *  Imports the skill at `path`, reading it again. `replace_id` replaces that skill; `rename`
+	 *  saves it under a new name.
 	 */
-	skillImport: (path: string, token: string, replaceId: string | null, rename: string | null) => __TAURI_INVOKE<SkillView>("skill_import", { path, token, replaceId, rename }),
+	skillImport: (path: string, replaceId: string | null, rename: string | null) => __TAURI_INVOKE<SkillView>("skill_import", { path, replaceId, rename }),
 	/**  Writes the skill as a `.zip` to a path the user picked. */
 	skillExport: (id: string, path: string) => __TAURI_INVOKE<null>("skill_export", { id, path }),
 	mcpServersList: () => __TAURI_INVOKE<McpServerView[]>("mcp_servers_list"),
@@ -376,6 +382,8 @@ export const commands = {
 	always_ask: boolean,
 	tool: McpToolView,
 } | null>("mcp_tool_info", { conversationId, name }),
+	/**  The MCP tool a `call_mcp_tool` call names (AI-45), for its approval card. */
+	mcpProxyInfo: (conversationId: string, callArguments: string) => __TAURI_INVOKE<McpProxyInfo>("mcp_proxy_info", { conversationId, callArguments }),
 	/**  AI-33: what pasted `mcpServers` / VS Code `servers` JSON would add. */
 	mcpImportPreview: (json: string) => __TAURI_INVOKE<McpImportPreview>("mcp_import_preview", { json }),
 	/**  Adds every importable server; env and header values move into the vault. */
@@ -398,6 +406,29 @@ export const events = {
 };
 
 /* Types */
+/**
+ *  An AI approval saved on this device (AI-19): never synced, kept until the user removes it.
+ *  A command or tool approval names its host by `host_id`, or by `target` for a quick-connect tab.
+ */
+export type AiAllowance = {
+	kind: AiAllowanceKind,
+	/**  The saved host the approval is for. */
+	host_id: string | null,
+	/**  The quick-connect target (`user@host:port`) the approval is for, without a saved host. */
+	target: string | null,
+	/**  The command prefix, the tool's name, or the domain. */
+	value: string,
+};
+
+/**  What an AI approval saved on this device lets run without asking (AI-19). */
+export type AiAllowanceKind = 
+/**  `run_command` calls whose command starts with `value`, on one host. */
+"command" | 
+/**  Every call of the tool `value` (`edit_file`, `write_file` or `send_input`), on one host. */
+"tool" | 
+/**  `fetch_url` calls of pages on the host name `value`, on any tab. */
+"domain";
+
 export type AiAuthHeader = "x-api-key" | "authorization";
 
 export type AiConversationDetail = {
@@ -632,7 +663,7 @@ export type AiSettingsView = {
 	search_provider_id: string | null,
 	/**  The built-in `hatoba` skill is offered (AI-34). */
 	builtin_skill_enabled: boolean,
-	/**  Sent with every request, at most 4,000 characters (AI-36). */
+	/**  Sent with every request, at most 32 KB of UTF-8 (AI-36). */
 	custom_instructions: string,
 };
 
@@ -732,10 +763,18 @@ export type AiTurnContext = {
 	disabled_mcp_servers: string[],
 };
 
-export type AiTurnEndReason = "completed" | "length" | "refused" | "stopped" | "error";
+export type AiTurnEndReason = "completed" | "length" | "refused" | 
+/**  The response had neither text nor tool calls, such as a reply of reasoning only (§13.1). */
+"empty" | "stopped" | "error";
 
 /**  Streamed on the channel of `ai_send` / `ai_retry` for the whole turn (§13.1). */
-export type AiTurnEvent = { kind: "request_started" } | { kind: "text"; delta: string } | { kind: "reasoning"; delta: string } | { kind: "tool_call"; id: string; name: string; arguments: string } | { kind: "usage"; input_tokens: number; output_tokens: number; estimated: boolean } | 
+export type AiTurnEvent = 
+/**
+ *  The turn of a new conversation is registered under this id, which the conversation is
+ *  stored under with its message. Sent before the message waits for the MCP servers (AI-45),
+ *  so a stop can name the turn before `ai_send` returns.
+ */
+{ kind: "opened"; conversation_id: string } | { kind: "request_started" } | { kind: "text"; delta: string } | { kind: "reasoning"; delta: string } | { kind: "tool_call"; id: string; name: string; arguments: string } | { kind: "usage"; input_tokens: number; output_tokens: number; estimated: boolean } | 
 /**  An entry was stored: the assistant response, a tool result, or a cancelled result. */
 { kind: "entry"; entry: AiEntryView } | 
 /**  One response finished. With `tool_calls`, Rust waits for every call's result. */
@@ -769,6 +808,11 @@ export type AppInfo = {
 	version: string,
 	platform: Platform,
 	mica: boolean,
+	/**
+	 *  The local user name, which quick connect (HOST-12) uses when the target names no user;
+	 *  empty when unknown.
+	 */
+	local_user: string,
 };
 
 export type Appearance = "system" | "light" | "dark";
@@ -1054,7 +1098,7 @@ export type HostInput = {
 	/**  Required when `proxy_mode` is `proxy`, ignored otherwise. */
 	proxy_id: string | null,
 	note: string,
-	/**  At most 2,000 characters (AI-37). */
+	/**  At most 16 KB of UTF-8 (AI-37). */
 	ai_notes: string,
 	/**  Names are trimmed; see `hatoba_core::model::check_host_env` for the rules (SSH-14). */
 	env: HostEnvVar[],
@@ -1110,6 +1154,18 @@ export type HostView = {
 	env: HostEnvVar[],
 };
 
+/**  Read-only backup history of one vault installation. Retention never crosses this boundary. */
+export type ICloudBackupDevice = {
+	device_id: string,
+	name: string,
+	platform: string,
+	current: boolean,
+	last_at: number | null,
+	last_uploaded_at: number | null,
+	entries: ICloudBackupEntry[],
+	error: string | null,
+};
+
 /**  One immutable iCloud Drive encrypted snapshot. */
 export type ICloudBackupEntry = {
 	name: string,
@@ -1124,7 +1180,10 @@ export type ICloudBackupStatus = {
 	automatic: boolean,
 	retention: number,
 	last_at: number | null,
+	/**  Only snapshots confirmed uploaded by macOS contribute to this timestamp. */
+	last_uploaded_at: number | null,
 	entries: ICloudBackupEntry[],
+	devices: ICloudBackupDevice[],
 	error: string | null,
 };
 
@@ -1177,22 +1236,28 @@ export type LocalPrefs = {
 	density: Density,
 	host_probe: boolean,
 	/**
-	 *  Check GitHub for a newer release once after unlock. Off by default: no request leaves
-	 *  the device unless the user asks for it (spec §11, no telemetry).
+	 *  Check GitHub for a newer release once after the first unlock of each launch (spec §11).
+	 *  On by default; the request carries no identifier.
 	 */
 	auto_update_check: boolean,
 	/**  AI-16: the permission mode new conversations start in on this device. */
 	ai_permission_mode: AiPermissionMode,
 	/**  AI-16: the user confirmed the first switch to bypass on this device. */
 	ai_bypass_confirmed: boolean,
-	/**  AI-18: a turn pauses after this many tool calls. */
-	ai_tool_call_limit: number,
 	/**  The AI panel is open (§9). */
 	ai_panel_open: boolean,
 	/**  The AI panel's width in CSS pixels. */
 	ai_panel_width: number,
 	/**  SSH-13: the proxy that hosts set to the device default connect through, on this device. */
 	default_proxy_id: string | null,
+	/**  SEC-02: minutes without input before the vault locks; 0 never locks. */
+	auto_lock_minutes: number,
+	/**  SEC-02: lock the vault when the computer sleeps. */
+	lock_on_sleep: boolean,
+	/**  SEC-03: disconnect the SSH sessions when the vault locks. */
+	lock_disconnects_sessions: boolean,
+	/**  SEC-08: seconds until a copied password is cleared from the clipboard; 0 never clears it. */
+	clipboard_clear_secs: number,
 };
 
 export type LockReason = "manual" | "idle" | "sleep";
@@ -1213,6 +1278,17 @@ export type McpImportServer = {
 export type McpImportSkipped = {
 	name: string,
 	reason: string,
+};
+
+/**  What the approval card of a `call_mcp_tool` call needs (AI-45). */
+export type McpProxyInfo = {
+	/**
+	 *  The tool the call names, as `mcp_tool_info` gives a direct call's; null when the
+	 *  conversation has no tool of that name or its server was deleted.
+	 */
+	tool: McpToolInfo | null,
+	/**  False when the call cannot run: it then gets its error result without asking. */
+	runs: boolean,
 };
 
 export type McpSecretInput = {
@@ -1411,8 +1487,6 @@ export type SessionStateEvent = {
 
 export type SettingsView = {
 	terminal: TerminalSettings,
-	auto_lock_minutes: number,
-	lock_disconnects_sessions: boolean,
 };
 
 export type SkillDetail = {
@@ -1445,11 +1519,6 @@ export type SkillImportPreview = {
 	existing_id: string | null,
 	/**  The name is the built-in skill's (AI-34): the skill can be imported only under another. */
 	reserved_name: boolean,
-	/**
-	 *  A digest of what was read, which `skill_import` takes back: it imports the source only if
-	 *  it still reads the same, so what is saved is what this preview showed.
-	 */
-	token: string,
 };
 
 export type SkillInput = {
@@ -1556,6 +1625,11 @@ export type SyncStatus = {
 	 *  `None` when there is nothing to show, including a dismissed "update available".
 	 */
 	worker_update: WorkerUpdate | null,
+	/**
+	 *  The items the last sync round could not upload because they are larger than sync accepts
+	 *  (§6.2). Empty while locked and until a round of this connection has finished.
+	 */
+	too_large: TooLargeItem[],
 };
 
 export type SyncTestResult = {
@@ -1596,6 +1670,16 @@ export type TestResult = {
 };
 
 export type ThemeChoice = "system" | "light" | "dark";
+
+/**
+ *  An item larger than sync accepts. It stays pending, and every round tries it again until it is
+ *  shortened or deleted.
+ */
+export type TooLargeItem = {
+	item_id: string,
+	item_type: ItemType,
+	item_name: string,
+};
 
 export type TransferDirection = "upload" | "download";
 

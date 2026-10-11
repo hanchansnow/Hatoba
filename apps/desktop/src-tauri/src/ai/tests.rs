@@ -1,6 +1,6 @@
 //! Turn tests (spec §12, AI bullet): the turn engine against a mock Chat Completions provider,
 //! without Tauri. Approval, edit, rejection, stop, lock and the cancelled results of calls left
-//! without one, and side questions (AI-42); the tool call limit is the frontend's (AI-18).
+//! without one, and side questions (AI-42).
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -119,6 +119,7 @@ fn ended(e: &AiTurnEvent) -> Option<AiTurnEndReason> {
 
 fn kind(e: &AiTurnEvent) -> &'static str {
     match e {
+        AiTurnEvent::Opened { .. } => "opened",
         AiTurnEvent::RequestStarted => "request_started",
         AiTurnEvent::Text { .. } => "text",
         AiTurnEvent::Reasoning { .. } => "reasoning",
@@ -1271,6 +1272,62 @@ async fn a_provider_error_ends_the_turn_and_retry_goes_on() {
     let refused = f.retry(&conv, f.context()).unwrap_err();
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert_eq!(f.requests().await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_reply_without_an_answer_ends_the_turn_as_empty_and_retry_leaves_it_out() {
+    let finish =
+        |reason: &str| json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]});
+    let f = Fixture::new(vec![
+        // Reasoning only.
+        sse(&[
+            json!({"choices": [{"index": 0, "delta": {"role": "assistant", "reasoning_content": "Thinking it over."}}]}),
+            finish("stop"),
+        ]),
+        // Blank text.
+        sse(&[text_delta(" \n "), finish("stop")]),
+        // Cut off before any text: the output limit is what the panel names.
+        sse(&[
+            json!({"choices": [{"index": 0, "delta": {"reasoning_content": "Still thinking."}}]}),
+            finish("length"),
+        ]),
+        answer("Recovered."),
+    ])
+    .await;
+    let (started, sink) = f.send(None, "hi").await;
+    let conv = started.conversation.id;
+    assert_eq!(sink.ended().await, AiTurnEndReason::Empty);
+    assert!(sink.errors().is_empty());
+    f.idle(&conv).await;
+    let entries = f.entries(&conv);
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(&entries[1].body, EntryBody::Assistant(a)
+        if a.text.is_empty() && a.reasoning.as_deref() == Some("Thinking it over.")));
+
+    // The empty reply is no answer, so there is something to retry.
+    let retry = f.retry(&conv, f.context()).unwrap();
+    assert_eq!(retry.ended().await, AiTurnEndReason::Empty);
+    f.idle(&conv).await;
+    let retry = f.retry(&conv, f.context()).unwrap();
+    assert_eq!(retry.ended().await, AiTurnEndReason::Length);
+    f.idle(&conv).await;
+    let retry = f.retry(&conv, f.context()).unwrap();
+    assert_eq!(retry.ended().await, AiTurnEndReason::Completed);
+    f.idle(&conv).await;
+    let entries = f.entries(&conv);
+    assert_eq!(entries.len(), 5);
+    assert!(matches!(&entries[4].body, EntryBody::Assistant(a) if a.text == "Recovered."));
+
+    // Every request leaves the empty replies out.
+    let requests = f.requests().await;
+    assert_eq!(requests.len(), 4);
+    for body in &requests {
+        let roles: Vec<&str> = messages(body)
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["system", "user"]);
+    }
 }
 
 /// The level the stored conversation keeps (AI-05).
@@ -3515,7 +3572,7 @@ async fn the_prompt_names_the_model_and_the_server_and_carries_instructions_and_
         "The terminal tab is connected to the host \"prod-db\" as the user \"ops\".\n\
          The SSH server identifies itself as \"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5\".\n\
          </context>",
-        "- Follow the user's instructions and the host notes below unless",
+        "- Follow the user's instructions and the host notes below; where they differ",
         "</rules>\n\n<user_instructions>\nAnswer in English.\n</user_instructions>\n\n\
          <host_notes host=\"prod-db\">\nPostgreSQL 16 primary.\nAsk before <restarting> it.\n\
          </host_notes>\n\n<attachments>",
@@ -6123,3 +6180,5 @@ fn a_note_names_a_target_or_a_single_host() {
         (None, Some("root@10.0.0.9:22".into()), None)
     );
 }
+
+mod deferred;

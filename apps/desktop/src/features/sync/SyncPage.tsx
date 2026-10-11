@@ -4,6 +4,7 @@ import { api } from "@/ipc/api";
 import { SyncConflictsView } from "./SyncConflictsView";
 import { SyncStatusView } from "./SyncStatusView";
 import { SyncWizard } from "./SyncWizard";
+import { syncNeedsAttention } from "./status";
 import { ICloudBackup } from "./ICloudBackup";
 import s from "./Sync.module.css";
 
@@ -15,6 +16,7 @@ export function SyncPage() {
   const mac = useApp((st) => st.info.platform === "macos");
   const [backupOpen, setBackupOpen] = useState<boolean | null>(() => mac ? useApp.getState().icloudBackup?.enabled ?? null : false);
   const sync = useApp((st) => st.sync);
+  const [explicitBackup, setExplicitBackup] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const kind = sync?.kind;
 
@@ -36,9 +38,9 @@ export function SyncPage() {
     if (kind === "none") setReviewing(false);
   }, [kind]);
 
-  if (mac && backupOpen) return <ICloudBackup onBack={() => setBackupOpen(false)} />;
+  if (mac && backupOpen && (explicitBackup || !syncNeedsAttention(sync))) return <ICloudBackup onBack={() => { setExplicitBackup(false); setBackupOpen(false); }} />;
   return !sync || (mac && backupOpen === null) ? <div className={s.page} /> : sync.kind === "none" ? <SyncWizard />
     : reviewing ? <SyncConflictsView onClose={() => setReviewing(false)} />
     : <SyncStatusView status={sync} onReview={() => setReviewing(true)}
-      onBackup={mac ? () => setBackupOpen(true) : undefined} />;
+      onBackup={mac ? () => { setExplicitBackup(true); setBackupOpen(true); } : undefined} />;
 }

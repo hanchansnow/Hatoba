@@ -171,7 +171,7 @@ export interface HostInput {
   /** Required when `proxy_mode` is `proxy`, ignored otherwise. */
   proxy_id: string | null;
   note: string;
-  /** At most 2,000 characters (AI-37). */
+  /** At most 16 KB of UTF-8 (AI-37). */
   ai_notes: string;
   /** Checked as in `features/hosts/envVars.ts` (SSH-14). */
   env: HostEnvVar[];
@@ -493,6 +493,14 @@ export interface SyncStatus {
   counts: { hosts: number; keys: number; groups: number } | null;
   /** Worker mode: how the Worker's `/v1/health` compares with this app (§6.7, Upgrades). `null` when there is nothing to show. */
   worker_update: WorkerUpdate | null;
+  /** Items the last sync round couldn't upload because they are larger than sync accepts (§6.2). They stay pending. */
+  too_large: TooLargeItem[];
+}
+
+export interface TooLargeItem {
+  item_id: string;
+  item_type: ItemType;
+  item_name: string;
 }
 
 /** `available`: sync continues and the notice can be dismissed. `required` and `app_required` pause sync. */
@@ -682,8 +690,6 @@ export interface TerminalSettings {
 /** Synced settings item (spec §5.1 `Settings`). */
 export interface SettingsView {
   terminal: TerminalSettings;
-  auto_lock_minutes: number;
-  lock_disconnects_sessions: boolean;
 }
 
 export type Language = "system" | "zh-CN" | "en" | "ja";
@@ -695,20 +701,26 @@ export interface LocalPrefs {
   density: "regular" | "compact";
   /** HOST-10 TCP reachability dots. */
   host_probe: boolean;
-  /** Check GitHub Releases once after unlock. Off by default (no telemetry, spec §11). */
+  /** Check GitHub Releases once after the first unlock of each launch. On by default (spec §11). */
   auto_update_check: boolean;
   /** AI-16: the permission mode new conversations start in on this device. */
   ai_permission_mode: AiPermissionMode;
   /** AI-16: the user confirmed the first switch to bypass on this device. */
   ai_bypass_confirmed: boolean;
-  /** AI-18: a turn pauses after this many tool calls (25 by default). */
-  ai_tool_call_limit: number;
   /** The AI panel is open (§9). */
   ai_panel_open: boolean;
   /** The AI panel's width in CSS pixels. */
   ai_panel_width: number;
   /** SSH-13: the proxy that hosts set to the device default connect through, on this device. */
   default_proxy_id: string | null;
+  /** SEC-02: minutes without input before the vault locks; 0 never locks. */
+  auto_lock_minutes: number;
+  /** SEC-02: lock the vault when the computer sleeps. */
+  lock_on_sleep: boolean;
+  /** SEC-03: disconnect the SSH sessions when the vault locks. */
+  lock_disconnects_sessions: boolean;
+  /** SEC-08: seconds until a copied password is cleared from the clipboard; 0 never clears it. */
+  clipboard_clear_secs: number;
 }
 
 /** Device-local state of the sidebar's GitHub star prompt (spec §9). */
@@ -724,6 +736,8 @@ export interface AppInfo {
   platform: "windows" | "macos" | "linux" | "web";
   /** Windows 11 Mica is active (WIN-07). */
   mica: boolean;
+  /** The local user name, which quick connect uses when the target names no user (HOST-12); empty when unknown. */
+  local_user: string;
 }
 
 /** What the update check found (spec §11). */
@@ -840,11 +854,24 @@ export interface AiSettingsView {
   search_provider_id: string | null;
   /** The built-in `hatoba` skill is offered (AI-34). */
   builtin_skill_enabled: boolean;
-  /** Sent with every request, at most 4,000 characters (AI-36). */
+  /** Sent with every request, at most 32 KB of UTF-8 (AI-36). */
   custom_instructions: string;
 }
 
 export type AiPermissionMode = "manual" | "bypass";
+
+/**
+ * An AI approval saved on this device (AI-19), never synced: `run_command` calls that start with the
+ * prefix `value` on a host, every call of the tool `value` (`edit_file`, `write_file`, `send_input`) on
+ * a host, or `fetch_url` calls of pages on the domain `value`. A host is a saved host's id, or the
+ * quick-connect target (`user@host:port`) of a tab without one.
+ */
+export interface AiAllowance {
+  kind: "command" | "tool" | "domain";
+  host_id: string | null;
+  target: string | null;
+  value: string;
+}
 
 export interface AiConversationView {
   id: string;
@@ -942,10 +969,14 @@ export interface AiSendStarted {
   user_entry: AiEntryView;
 }
 
-export type AiTurnEndReason = "completed" | "length" | "refused" | "stopped" | "error";
+/** `empty`: the response had neither text nor tool calls, such as a reply of reasoning only (§13.1). */
+export type AiTurnEndReason = "completed" | "length" | "refused" | "empty" | "stopped" | "error";
 
 /** Streamed on the channel of `ai_send` / `ai_retry` for the whole turn (§13.1). */
 export type AiTurnEvent =
+  /** A new conversation's turn is registered under this id, which it is stored under with its message; sent
+   * before the message waits for the MCP servers (AI-45), so a stop can name the turn before `ai_send` returns. */
+  | { kind: "opened"; conversation_id: string }
   | { kind: "request_started" }
   | { kind: "text"; delta: string }
   | { kind: "reasoning"; delta: string }
@@ -1139,8 +1170,6 @@ export interface SkillImportPreview {
   existing_id: string | null;
   /** The name is the built-in skill's (AI-34): the skill can be imported only under another. */
   reserved_name: boolean;
-  /** A digest of what was read, which `skill_import` takes back: it imports only what this preview showed. */
-  token: string;
 }
 
 // ───────────────────────── AI assistant: MCP servers (§13.9) ─────────────────────────
@@ -1223,6 +1252,14 @@ export interface McpToolInfo {
   tool: McpToolView;
 }
 
+/** What the approval card of a `call_mcp_tool` call needs (AI-45). */
+export interface McpProxyInfo {
+  /** The tool the call names, as `mcp_tool_info` gives a direct call's; null when the conversation has no tool of that name or its server was deleted. */
+  tool: McpToolInfo | null;
+  /** False when the call cannot run: it then gets its error result without asking. */
+  runs: boolean;
+}
+
 export interface McpImportPreview {
   servers: { name: string; transport: McpTransportView; exists: boolean }[];
   /** Entries that cannot be imported, such as an `sse` server, with the reason. */
@@ -1276,11 +1313,23 @@ export interface ICloudBackupEntry {
   size: number;
   transfer: string;
 }
+export interface ICloudBackupDevice {
+  device_id: string;
+  name: string;
+  platform: string;
+  current: boolean;
+  last_at: number | null;
+  last_uploaded_at: number | null;
+  entries: ICloudBackupEntry[];
+  error: string | null;
+}
 export interface ICloudBackupStatus {
   enabled: boolean;
   automatic: boolean;
   retention: number;
   last_at: number | null;
+  last_uploaded_at: number | null;
   entries: ICloudBackupEntry[];
+  devices: ICloudBackupDevice[];
   error: string | null;
 }

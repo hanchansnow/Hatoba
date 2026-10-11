@@ -1,6 +1,7 @@
 import { defineMessages } from "./define";
 export default defineMessages({
   "zh-CN": {
+    "backup.restoring": "正在验证并恢复加密备份…",
     "backup.footer.synced_sub": "{time} · iCloud",
     "backup.retention": "保留最近快照数量", "backup.retentionInvalid": "请输入至少为 1 的整数。",
     "backup.tab": "iCloud 备份", "backup.manage": "管理备份",
@@ -8,7 +9,7 @@ export default defineMessages({
     "backup.methodBody": "主机、密钥与设置会先在此设备上加密。选择云同步方式，或将加密备份保存到 iCloud Drive。",
     "backup.methodDescription": "将主机、密钥和设置自动加密，保存到 iCloud Drive 的 Hatoba 文件夹。支持手动备份、自动备份和从历史快照恢复。",
     "backup.encryption": "iCloud Drive 保存加密的保险库快照，主机、密钥和设置保持加密。恢复需要生成这份备份时使用的主密码。",
-    "backup.title": "iCloud 加密备份", "backup.description": "将保险库的加密快照直接保存在 iCloud Drive 的 Hatoba 文件夹中。",
+    "backup.title": "iCloud 加密备份", "backup.description": "将保险库的加密快照保存在 iCloud Drive 的 Hatoba 文件夹中，每台设备使用独立目录。",
     "backup.enabled": "启用 iCloud 备份", "backup.auto": "自动备份",
     "backup.saving": "正在保存加密备份", "backup.checkFailed": "上传确认失败（5 次检查未确认完成）",
     "backup.now": "立即备份", "backup.saved": "加密备份已保存，macOS 将继续上传。",
@@ -25,6 +26,7 @@ export default defineMessages({
     "backup.note": "每个文件都是独立历史快照。macOS 上传完成后，其他设备可从 iCloud Drive 获取它。",
   },
   en: {
+    "backup.restoring": "Verifying and restoring the encrypted backup…",
     "backup.footer.synced_sub": "{time} · iCloud",
     "backup.retention": "Snapshots to keep", "backup.retentionInvalid": "Enter a whole number of at least 1.",
     "backup.tab": "iCloud Backup", "backup.manage": "Manage Backups",
@@ -32,7 +34,7 @@ export default defineMessages({
     "backup.methodBody": "Hosts, keys and settings are encrypted on this device first. Choose a sync method, or save encrypted backups in iCloud Drive.",
     "backup.methodDescription": "Automatically encrypt hosts, keys and settings and save them in iCloud Drive’s Hatoba folder. Back up manually or automatically, and restore from a previous snapshot.",
     "backup.encryption": "iCloud Drive stores an encrypted vault snapshot. Hosts, keys and settings remain encrypted. Restoring requires the master password used when the backup was created.",
-    "backup.title": "Encrypted iCloud Backup", "backup.description": "Save encrypted vault snapshots directly in the Hatoba folder in iCloud Drive.",
+    "backup.title": "Encrypted iCloud Backup", "backup.description": "Save encrypted vault snapshots in iCloud Drive’s Hatoba folder, with a separate folder for each device.",
     "backup.enabled": "Enable iCloud Backup", "backup.auto": "Automatic backup",
     "backup.saving": "Saving encrypted backup", "backup.checkFailed": "Upload confirmation failed after 5 checks",
     "backup.now": "Back Up Now", "backup.saved": "Encrypted backup saved. macOS will continue uploading it.",
@@ -49,6 +51,7 @@ export default defineMessages({
     "backup.note": "Each file is a separate historical snapshot. After macOS finishes uploading it, other devices can retrieve it from iCloud Drive.",
   },
   ja: {
+    "backup.restoring": "暗号化バックアップを検証して復元しています…",
     "backup.footer.synced_sub": "{time} · iCloud",
     "backup.retention": "保持するスナップショット数", "backup.retentionInvalid": "1 以上の整数を入力してください。",
     "backup.tab": "iCloud バックアップ", "backup.manage": "バックアップを管理",
@@ -56,7 +59,7 @@ export default defineMessages({
     "backup.methodBody": "ホスト、鍵、設定はまずこのデバイス上で暗号化されます。同期方法を選ぶか、iCloud Drive に暗号化バックアップを保存できます。",
     "backup.methodDescription": "ホスト、鍵、設定を自動で暗号化し、iCloud Drive の Hatoba フォルダに保存します。手動・自動バックアップと過去のスナップショットからの復元に対応します。",
     "backup.encryption": "iCloud Drive に暗号化された保管庫のスナップショットを保存します。ホスト、鍵、設定は暗号化されたままです。復元には作成時のマスターパスワードが必要です。",
-    "backup.title": "iCloud 暗号化バックアップ", "backup.description": "保管庫の暗号化スナップショットを iCloud Drive の Hatoba フォルダに直接保存します。",
+    "backup.title": "iCloud 暗号化バックアップ", "backup.description": "保管庫の暗号化スナップショットを iCloud Drive の Hatoba フォルダ内に、デバイスごとのフォルダで保存します。",
     "backup.enabled": "iCloud バックアップを有効にする", "backup.auto": "自動バックアップ",
     "backup.saving": "暗号化バックアップを保存中", "backup.checkFailed": "5 回確認してもアップロード完了を確認できませんでした",
     "backup.now": "今すぐバックアップ", "backup.saved": "暗号化バックアップを保存しました。macOS がアップロードを続行します。",

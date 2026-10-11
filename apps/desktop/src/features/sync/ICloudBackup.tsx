@@ -100,7 +100,7 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
     };
   }, [load, showStatus]);
   useEffect(() => {
-    const waiting = status?.entries.some((entry) => !["uploaded", "error", "timeout"].includes(entry.transfer));
+    const waiting = status?.devices.some((device) => device.entries.some((entry) => !["uploaded", "error", "timeout"].includes(entry.transfer)));
     if (!active || busy || refreshing || inFlight.current > 0) return;
     if (pending.current) { pending.current = false; void load(); return; }
     if (failures.current >= 5 || (!waiting && !refreshError && !status?.error)) return;
@@ -113,6 +113,7 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
   const perform = async (action: () => Promise<ICloudBackupStatus | void>, backup = false) => {
     // Ignore an older query that finishes while a new backup is being saved.
     request.current++; setRefreshing(false);
+    if (backup) useApp.setState({ backupSaving: true });
     setBusy(true); setSaving(backup); setError(null); setRefreshError(null); failures.current = 0;
     setStatus((previous) => previous ? { ...previous, error: null } : previous);
     try {
@@ -121,8 +122,8 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
       if (next) { showStatus(next); setChecked((value) => value + 1); }
       else await load();
     }
-    catch (e) { setError(errorMessage(t, e)); }
-    finally { if (mounted.current) { setBusy(false); setSaving(false); } }
+    catch (e) { setError(errorMessage(t, e)); await load(); }
+    finally { if (backup) useApp.setState({ backupSaving: false }); if (mounted.current) { setBusy(false); setSaving(false); } }
   };
   return <div className={`${page.page} ${active ? "" : s.paused}`}><div className={page.scroll}><div className={page.column}>
     {onBack && <div className={s.actions}><Button icon="arrow-left" disabled={busy} onClick={onBack}>{t("btn.back")}</Button></div>}
@@ -161,16 +162,28 @@ export function ICloudBackup({ onBack }: { onBack?: () => void }) {
     </div>
     {(error || refreshError || status?.error) && <div role="alert" className={s.error}>{error || refreshError || status?.error}</div>}
     <p className={s.hint}>{t("backup.last")}: {status?.last_at ? formatDateTime(t.locale, status.last_at) : t("backup.never")}</p>
-    <Section title={t("backup.history")}><Group>
-      {!status?.entries.length && <div className={s.empty}>{t("backup.empty")}</div>}
-      {status?.entries.map((entry) => <div className={s.entry} key={entry.name}>
+    <Section title={`${t("sync.sec.devices")} · ${status?.devices.length ?? 0}`}><Group>
+      {!status?.devices.length && <div className={s.empty}>{t("backup.empty")}</div>}
+      {status?.devices.map((device) => <div key={device.device_id}>
+        <div className={page.device}>
+          <Icon name="laptop" className={page.deviceIcon} />
+          <div className={page.deviceText}>
+            <div className={page.deviceName}><span className={page.deviceNameText}>{device.name}</span>
+              {device.current && <span className={page.badge}>{t("sync.device.thisPc")}</span>}</div>
+            <div className={page.deviceMeta}>{device.platform} · {device.last_at ? formatDateTime(t.locale, device.last_at) : t("backup.never")}</div>
+          </div>
+        </div>
+        {device.error && <div role="alert" className={s.error}>{device.error}</div>}
+        {!device.entries.length && <div className={s.empty}>{t("backup.empty")}</div>}
+        {device.entries.map((entry) => <div className={s.entry} key={entry.name}>
         <div className={s.meta}><div className={s.time}>{formatDateTime(t.locale, entry.created_at)} · {formatBytes(entry.size)}</div>
           <div className={s.name}>{entry.name}</div>
           <div className={`${s.state} ${entry.transfer === "uploaded" ? s.good : entry.transfer === "uploading" ? s.uploading : ["error", "timeout"].includes(entry.transfer) ? s.failed : ""}`} role="status">
             {entry.transfer === "uploading" ? <Spinner /> : <Icon name={entry.transfer === "uploaded" ? "check-circle" : ["error", "timeout"].includes(entry.transfer) ? "warning-circle" : entry.transfer === "pending" ? "clock" : "question"} size={14} />}
             <span>{t(entry.transfer === "uploaded" ? "backup.uploaded" : entry.transfer === "uploading" ? "backup.uploading" : entry.transfer === "pending" ? "backup.pending" : entry.transfer === "error" ? "backup.error" : entry.transfer === "timeout" ? "backup.checkFailed" : "backup.unknown")}</span>
           </div>
-        </div><Button disabled={busy} onClick={() => setRestore(entry.name)}>{t("backup.restore")}</Button>
+        </div><Button disabled={busy} onClick={() => setRestore(`${device.device_id}/${entry.name}`)}>{t("backup.restore")}</Button>
+      </div>)}
       </div>)}
     </Group></Section>
     <p className={s.hint}>{t("backup.contents")}</p><p className={s.hint}>{t("backup.note")}</p>
@@ -184,20 +197,24 @@ export function BackupRestore({ path, replace = false, onClose }: { path: string
   const [currentPassword, setCurrentPassword] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const restore = async () => {
     if (busy || !password || (replace && (!confirmed || !currentPassword))) return;
-    setBusy(true); setError(null);
+    setBusy(true);
+    useApp.setState({ backupRestore: { running: true, error: null } });
     try {
       const rollback = await api.icloud_backup_restore(path, password, replace, replace ? currentPassword : null);
       setPassword(""); setCurrentPassword("");
       if (rollback) {
         await api.show_backup_in_finder(rollback).catch(() => {});
       }
+      useApp.setState({ backupRestore: null });
       if (isTauri()) { window.location.reload(); return; }
       await enterUnlocked(); useApp.setState({ settingsOpen: false });
       toast(t("backup.restored"), "success"); onClose();
-    } catch (e) { setError(errorMessage(t, e)); setBusy(false); }
+    } catch (e) {
+      useApp.setState({ backupRestore: { running: false, error: errorMessage(t, e) } });
+      setBusy(false);
+    } finally { setPassword(""); setCurrentPassword(""); }
   };
   return <Dialog title={t("backup.restoreTitle")} body={replace ? t("backup.replaceHint") : t("backup.restoreHint")}
     onClose={busy ? undefined : onClose} actions={<>
@@ -210,7 +227,6 @@ export function BackupRestore({ path, replace = false, onClose }: { path: string
       <label className={s.field}>{t("backup.password")}<TextField secret autoFocus={!replace} autoComplete="off" value={password} disabled={busy} onChange={(e) => setPassword(e.target.value)} /></label>
       <p className={s.hint}>{t("backup.restoreHint")}</p>
       {replace && <label className={s.check}><input type="checkbox" checked={confirmed} disabled={busy} onChange={(e) => setConfirmed(e.target.checked)} />{t("backup.confirmReplace")}</label>}
-      {error && <div role="alert" className={s.error}>{error}</div>}
     </div>
   </Dialog>;
 }

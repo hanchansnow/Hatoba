@@ -191,12 +191,9 @@ async fn long_content_pages_by_characters() {
     assert_eq!(first.total_length, 40_000);
     assert_eq!(first.content.chars().count(), MAX_FETCH_CHARS);
     assert!(text.starts_with(&first.content));
-    let second = fetch(16_000).await;
-    assert_eq!(second.offset, 16_000);
-    assert_eq!(
-        format!("{}{}", first.content, second.content),
-        text.chars().take(32_000).collect::<String>()
-    );
+    let second = fetch(30_000).await;
+    assert_eq!(second.offset, 30_000);
+    assert_eq!(format!("{}{}", first.content, second.content), text);
     let tail = fetch(39_990).await;
     assert_eq!(tail.content, "日本語ab日本語ab");
     let past = fetch(50_000).await;
@@ -204,8 +201,8 @@ async fn long_content_pages_by_characters() {
 
     let header = format_fetch_result(&first);
     assert!(header.starts_with(&format!(
-        "URL: {url} | Content type: text/plain | Characters 0-16000 of 40000\n\
-         More content follows: call fetch_url again with offset 16000 to read on.\n\n"
+        "URL: {url} | Content type: text/plain | Characters 0-30000 of 40000\n\
+         More content follows: call fetch_url again with offset 30000 to read on.\n\n"
     )));
     assert!(format_fetch_result(&tail).contains("Characters 39990-40000 of 40000\n\n"));
     assert!(format_fetch_result(&past).contains("No content at this offset."));
@@ -242,12 +239,25 @@ async fn private_addresses_are_refused_including_after_a_redirect() {
     .await;
     mount(&server, "/page", body("text/plain", "inside")).await;
     let cancel = CancellationToken::new();
-    for at in ["/to-ip", "/to-v6", "/to-name", "/to-mixed", "/to-metadata"] {
+    for at in ["/to-ip", "/to-v6", "/to-metadata"] {
         let err = fetcher()
             .fetch(&public_url(&server, at), 0, &cancel)
             .await
             .unwrap_err();
         assert_eq!(err, AiError::Blocked(REDIRECT_BLOCKED.into()), "{at}");
+    }
+    // A name on another host is not followed, so it is not resolved either: a fetch of it is a
+    // call of its own, refused below.
+    for (at, to) in [("/to-name", "rebind.test"), ("/to-mixed", "mixed.test")] {
+        let result = fetcher()
+            .fetch(&public_url(&server, at), 0, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.redirect,
+            Some(format!("http://{to}:{port}/page")),
+            "{at}"
+        );
     }
     // Directly, without a redirect.
     for url in [
@@ -289,6 +299,103 @@ async fn the_public_fetch_refuses_loopback() {
         assert!(matches!(err, AiError::Blocked(_)), "{url}: {err:?}");
     }
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn behind_a_local_proxy_the_targets_are_still_checked() {
+    // A proxy on loopback, as desktop proxy tools run one: the mock server, which answers the
+    // proxied request itself. Its own address is no target, so the public policy lets it through.
+    let proxy = MockServer::start().await;
+    mount(&proxy, "/page", body("text/plain", "through the proxy")).await;
+    let fetcher = Fetcher {
+        proxy: Proxy::At(format!("http://localhost:{}", proxy.address().port())),
+        ..Fetcher::public()
+    };
+    let cancel = CancellationToken::new();
+    let page = fetcher
+        .fetch("http://docs.example.test/page", 0, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(page.content, "through the proxy");
+    // The proxy resolves the targets' names, so what is refused here is refused by the host as
+    // written: an address, or localhost by its name.
+    for url in [
+        "http://localhost/page",
+        "http://api.LOCALHOST./page",
+        "http://127.0.0.1/page",
+        "http://10.1.2.3/page",
+        "http://[::1]/page",
+    ] {
+        let err = fetcher.fetch(url, 0, &cancel).await.unwrap_err();
+        assert!(matches!(err, AiError::Blocked(_)), "{url}: {err:?}");
+    }
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn redirects_to_another_host_are_returned_not_followed() {
+    let server = MockServer::start().await;
+    let other = MockServer::start().await;
+    let port = server.address().port();
+    let other_port = other.address().port();
+    mount(
+        &server,
+        "/away",
+        redirect(302, "https://elsewhere.test/page?q=1"),
+    )
+    .await;
+    // The same host on another port, and in other letter case, is followed.
+    mount(
+        &server,
+        "/port",
+        redirect(301, &format!("http://public.test:{other_port}/page")),
+    )
+    .await;
+    mount(
+        &server,
+        "/case",
+        redirect(302, &format!("http://PUBLIC.test:{port}/page")),
+    )
+    .await;
+    mount(&server, "/page", body("text/plain", "here")).await;
+    mount(&other, "/page", body("text/plain", "other port")).await;
+    let cancel = CancellationToken::new();
+
+    let away = fetcher()
+        .fetch(&public_url(&server, "/away"), 0, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        away,
+        FetchResult {
+            url: public_url(&server, "/away"),
+            redirect: Some("https://elsewhere.test/page?q=1".into()),
+            ..FetchResult::default()
+        }
+    );
+    assert_eq!(
+        format_fetch_result(&away),
+        format!(
+            "URL: {} | Redirects to another host: https://elsewhere.test/page?q=1\n\
+             fetch_url follows redirects only on the host it was given. To read the page, call \
+             fetch_url with that URL.\n",
+            public_url(&server, "/away")
+        )
+    );
+
+    let ported = fetcher()
+        .fetch(&public_url(&server, "/port"), 0, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        (ported.redirect, ported.content.as_str()),
+        (None, "other port")
+    );
+    let cased = fetcher()
+        .fetch(&public_url(&server, "/case"), 0, &cancel)
+        .await
+        .unwrap();
+    assert_eq!((cased.redirect, cased.content.as_str()), (None, "here"));
 }
 
 #[tokio::test]

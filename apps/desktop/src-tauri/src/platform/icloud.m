@@ -51,6 +51,18 @@ char *hatoba_icloud(const char *input) {
                 }
             }
             if (!result) result = error ? @{ @"error": @"Unable to download the iCloud backup." } : @{ @"ok": @YES };
+        } else if ([operation isEqual:@"move"]) {
+            NSURL *other = [NSURL fileURLWithPath:request[@"other"] ?: @""];
+            NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+            NSError *coordination = nil;
+            __block NSError *io = nil;
+            [coordinator coordinateWritingItemAtURL:url options:NSFileCoordinatorWritingForMoving
+                writingItemAtURL:other options:0 error:&coordination
+                byAccessor:^(NSURL *source, NSURL *target) {
+                    [fm moveItemAtURL:source toURL:target error:&io];
+                    if (!io) [coordinator itemAtURL:source didMoveToURL:target];
+                }];
+            result = (coordination || io) ? @{ @"error": @"Unable to migrate an older backup." } : @{ @"ok": @YES };
         } else if ([operation isEqual:@"remove"]) {
             NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
             NSError *coordination = nil;
