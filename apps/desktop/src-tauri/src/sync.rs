@@ -323,7 +323,13 @@ pub fn backend_for(
 /// Called after unlock / restore: (re)creates the backend from the saved config and syncs.
 pub fn on_unlock(app: &AppHandle) {
     let st = state(app);
-    let config = st.vault().sync_config().ok().flatten();
+    let (config, generation) = {
+        let vault = st.vault();
+        if !vault.is_unlocked() {
+            return;
+        }
+        (vault.sync_config().ok().flatten(), vault.lock_generation())
+    };
     let backend = config
         .as_ref()
         .and_then(|c| match backend_for(c, st.secrets.as_ref()) {
@@ -334,19 +340,18 @@ pub fn on_unlock(app: &AppHandle) {
             }
         });
     let configured = config.is_some();
-    st.sync.set_backend(backend);
-    if configured && st.sync.backend().is_none() {
-        st.sync.inner().state = SyncState::AuthFailed;
+    {
+        let vault = st.vault();
+        if !vault.is_unlocked() || vault.ensure_lock_generation(generation).is_err() {
+            return;
+        }
+        st.sync.set_backend(backend);
+        if configured && st.sync.backend().is_none() {
+            st.sync.inner().state = SyncState::AuthFailed;
+        }
     }
     emit_status(app);
     trigger(app, Trigger::Unlock);
-}
-
-/// Stops syncing (on lock), and the backend forgets its credentials. It is rebuilt from the
-/// credential store on the next unlock.
-pub fn stop(app: &AppHandle) {
-    state(app).sync.set_backend(None);
-    emit_status(app);
 }
 
 /// Called by every command that changed vault items.

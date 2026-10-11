@@ -50,7 +50,7 @@ fn idle_time(state: &AppState) -> Duration {
 fn idle_lock_due(state: &AppState, idle: Duration) -> bool {
     let minutes = state.lock_policy.auto_lock_minutes.load(Ordering::Relaxed);
     minutes != 0
-        && state.vault().is_unlocked()
+        && (state.vault().is_unlocked() || state.lifecycle.try_lock().is_err())
         && idle >= Duration::from_secs(u64::from(minutes) * 60)
 }
 
@@ -72,13 +72,14 @@ fn locks_on_sleep(state: &AppState) -> bool {
 /// comes after them, alongside closing the SSH sessions.
 pub async fn lock_vault(app: &AppHandle, reason: LockReason) {
     let state = state(app);
-    let _operation = state.lifecycle.lock().await;
-    lock_vault_during_operation(app, reason).await;
+    // Serialize cleanup with new unlocks when idle, but never wait for an existing task.
+    let _operation = state.lifecycle.try_lock().ok();
+    let was_unlocked = lock_now(&state);
+    finish_lock(app, reason, was_unlocked).await;
 }
 
-/// Caller holds the lifecycle gate (restore must keep it across locking and safety-file writes).
-pub(crate) async fn lock_vault_during_operation(app: &AppHandle, reason: LockReason) {
-    let state = state(app);
+/// Lock requests never wait for lifecycle operations, prompts, or network work.
+pub(crate) fn lock_now(state: &AppState) -> bool {
     let was_unlocked = {
         let mut vault = state.vault();
         let was = vault.is_unlocked();
@@ -86,15 +87,21 @@ pub(crate) async fn lock_vault_during_operation(app: &AppHandle, reason: LockRea
         // vault can still store it, and nothing writes between the stop and the lock.
         state.ai.stop_all(&mut vault);
         vault.lock();
+        // Install/stop the connection under the same vault mutex as unlock notification.
+        state.sync.set_backend(None);
         was
     };
+    state.deploy.clear();
+    was_unlocked
+}
+
+async fn finish_lock(app: &AppHandle, reason: LockReason, was_unlocked: bool) {
+    let state = state(app);
     if was_unlocked {
         tracing::info!("vault locked ({reason:?})");
         let _ = VaultLockedEvent { reason }.emit(app);
     }
-    sync::stop(app);
-    // DEPLOY-07: a deployment's tokens do not outlive the unlocked vault.
-    state.deploy.clear();
+    sync::emit_status(app);
     let disconnect = async {
         if disconnects_on_lock(&state) {
             // The sessions open now: one opened after an unlock in the meantime stays.
@@ -130,7 +137,7 @@ pub fn spawn_watchers(app: AppHandle) {
         let mut sleeps = crate::platform::power::watch_sleep();
         while sleeps.recv().await.is_some() {
             let state = state(&app);
-            if locks_on_sleep(&state) && state.vault().is_unlocked() {
+            if locks_on_sleep(&state) {
                 lock_vault(&app, LockReason::Sleep).await;
             }
         }
@@ -156,6 +163,58 @@ mod tests {
             .create_with_params(PW, KdfParams::for_tests())
             .unwrap();
         AppState::new(vault, false)
+    }
+
+    #[tokio::test]
+    async fn pending_lifecycle_work_cannot_delay_lock_or_install_a_stale_key() {
+        let state = std::sync::Arc::new(unlocked());
+        let generation = state.vault().lock_generation();
+        let key = state.vault().vault_key_copy().unwrap();
+        let operation = state.lifecycle_operation().unwrap();
+        let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+        let pending = {
+            let state = state.clone();
+            let resume = resume.clone();
+            tokio::spawn(async move {
+                resume.notified().await; // A biometric prompt/network operation is still pending.
+                state
+                    .with_lock_generation(generation, |vault| Ok(vault.unlock_with_vault_key(key)?))
+            })
+        };
+        let lock = {
+            let state = state.clone();
+            tokio::task::spawn_blocking(move || super::lock_now(&state))
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), lock)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert!(!state.vault().is_unlocked());
+        assert!(state.lifecycle.try_lock().is_err()); // The prompt/restore gate has not ended.
+        resume.notify_one();
+        assert!(pending.await.unwrap().is_err());
+        assert!(!state.vault().is_unlocked());
+        drop(operation);
+    }
+
+    #[test]
+    fn idle_and_sleep_requests_are_recorded_during_an_already_locked_restore() {
+        let state = unlocked();
+        state
+            .vault()
+            .set_local_prefs(r#"{"auto_lock_minutes":1}"#)
+            .unwrap();
+        refresh_policy(&state);
+        let operation = state.lifecycle_operation().unwrap();
+        super::lock_now(&state);
+        assert!(idle_lock_due(&state, IDLE));
+        let generation = state.vault().lock_generation();
+        assert!(!super::lock_now(&state));
+        assert_ne!(generation, state.vault().lock_generation());
+        drop(operation);
+        assert!(!idle_lock_due(&state, IDLE));
     }
 
     #[test]

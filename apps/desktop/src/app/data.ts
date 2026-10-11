@@ -31,7 +31,7 @@ export const useVaultData = create<VaultData>((set) => ({
   keys: [],
   proxies: [],
   reload: async () => {
-    generation++;
+    const started = ++generation;
     const [hosts, groups, tags, keys, proxies] = await Promise.all([
       api.hosts_list(),
       api.groups_list(),
@@ -39,6 +39,7 @@ export const useVaultData = create<VaultData>((set) => ({
       api.keys_list(),
       api.proxies_list(),
     ]);
+    if (started !== generation) return;
     set({ loaded: true, hosts, groups: [...groups].sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name)), tags, keys, proxies });
   },
   reloadHosts: async () => {

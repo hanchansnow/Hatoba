@@ -221,6 +221,8 @@ pub(crate) struct FakeBackend {
     session: RwLock<Option<Session>>,
     during_push: Mutex<Option<PushHook>>,
     after_pull: Mutex<Option<PushHook>>,
+    after_meta: Mutex<Option<PushHook>>,
+    after_meta_update: Mutex<Option<PushHook>>,
     stall_pull: Mutex<Option<Arc<tokio::sync::Notify>>>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -232,9 +234,19 @@ impl FakeBackend {
             session: RwLock::new(None),
             during_push: Mutex::new(None),
             after_pull: Mutex::new(None),
+            after_meta: Mutex::new(None),
+            after_meta_update: Mutex::new(None),
             stall_pull: Mutex::new(None),
             clock: Arc::new(|| 1_700_000_000_000),
         }
+    }
+
+    pub(crate) fn on_next_meta(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.after_meta.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    pub(crate) fn on_next_meta_update(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.after_meta_update.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Runs `hook` inside the next pushes, after the server applied them but before the client
@@ -416,14 +428,19 @@ impl SyncBackend for FakeBackend {
         self.authenticate(false)?;
         let s = self.server.st();
         let m = s.meta.as_ref().ok_or(Error::RemoteNotInitialized)?;
-        Ok(VaultMeta {
+        let meta = VaultMeta {
             schema_version: m.schema_version,
             kdf_salt: m.kdf_salt.clone(),
             kdf_params: m.kdf_params.clone(),
             protected_vault_key: m.protected_vault_key.clone(),
             recovery_vault_key: m.recovery_vault_key.clone(),
             seq: s.seq,
-        })
+        };
+        drop(s);
+        if let Some(hook) = self.after_meta.lock().unwrap().take() {
+            hook();
+        }
+        Ok(meta)
     }
 
     async fn pull(&self, since_seq: u64, limit: u32) -> Result<PullPage> {
@@ -556,6 +573,10 @@ impl SyncBackend for FakeBackend {
                 let _ = device_id;
             }
             Scope::Recovery => s.sessions.clear(),
+        }
+        drop(s);
+        if let Some(hook) = self.after_meta_update.lock().unwrap().take() {
+            hook();
         }
         Ok(())
     }

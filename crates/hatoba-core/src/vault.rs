@@ -254,6 +254,7 @@ pub struct Vault {
     pub(crate) store: Store,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) unlocked: Option<Unlocked>,
+    lock_generation: u64,
     /// Message parts read back from the store ([`Vault::ai_parts_read`]).
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) ai_parts_read: std::sync::atomic::AtomicUsize,
@@ -281,6 +282,7 @@ impl Vault {
             store,
             clock: Arc::new(SystemClock),
             unlocked: None,
+            lock_generation: 0,
             #[cfg(any(test, feature = "test-util"))]
             ai_parts_read: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -596,7 +598,22 @@ impl Vault {
 
     /// Locks: wipes the vault key and every decrypted item.
     pub fn lock(&mut self) {
+        self.lock_generation = self.lock_generation.wrapping_add(1);
         self.unlocked = None;
+    }
+
+    /// Identifies lock requests, including requests made while already locked.
+    pub fn lock_generation(&self) -> u64 {
+        self.lock_generation
+    }
+
+    /// Rejects key installation or connection setup begun before a subsequent lock.
+    pub fn ensure_lock_generation(&self, expected: u64) -> Result<()> {
+        if self.lock_generation == expected {
+            Ok(())
+        } else {
+            Err(Error::Locked)
+        }
     }
 
     // ---- password operations ----
@@ -690,17 +707,18 @@ impl Vault {
         };
         let (_salt, params) = self.load_kdf()?;
         let change = Self::derive_password_change(&vault_key, new_password, &params)?;
-        self.apply_recovered_password(&change, vault_key, &code.recovery_auth())?;
+        self.apply_recovered_password(&change, vault_key, &code.recovery_auth(), None)?;
         Ok(change)
     }
 
     /// Persists a password reset performed with the recovery code, clears the unlock throttle
-    /// and unlocks with the recovered vault key.
+    /// and unlocks with the recovered vault key unless a newer lock request must be preserved.
     pub(crate) fn apply_recovered_password(
         &mut self,
         change: &PasswordChange,
         vault_key: Key32,
         recovery_auth: &[u8; 32],
+        generation: Option<u64>,
     ) -> Result<()> {
         let sealed = seal_recovery_auth(&vault_key, recovery_auth)?;
         self.store.transaction(|tx| {
@@ -711,7 +729,12 @@ impl Vault {
             tx.delete_meta(meta::UNLOCK_FAILURES)?;
             tx.delete_meta(meta::UNLOCK_LAST_FAILURE_AT)
         })?;
-        self.finish_unlock(vault_key)
+        if generation.is_none_or(|expected| self.lock_generation == expected) {
+            self.finish_unlock(vault_key)
+        } else {
+            self.unlocked = None;
+            Ok(())
+        }
     }
 
     /// Prepares a new recovery code without applying it.
@@ -1251,13 +1274,14 @@ impl Vault {
     /// Installs the metadata of a remote vault into an empty local database and unlocks with
     /// the already-unwrapped vault key (flow B). A sync backend is recorded in the same
     /// transaction, so the vault never exists without the config to resume syncing.
-    /// Existing items are not touched.
+    /// Existing items are not touched. A lock requested since `generation` stays in effect.
     pub(crate) fn install_remote_vault(
         &mut self,
         remote: &VaultMeta,
         vault_key: Key32,
         device_id: &str,
         config: Option<&SyncConfig>,
+        generation: u64,
     ) -> Result<()> {
         if self.is_initialized() {
             return Err(Error::VaultAlreadyInitialized);
@@ -1282,7 +1306,12 @@ impl Vault {
             }
             tx.delete_meta(meta::SYNC_CURSOR)
         })?;
-        self.finish_unlock(vault_key)
+        if self.lock_generation == generation {
+            self.finish_unlock(vault_key)
+        } else {
+            self.unlocked = None;
+            Ok(())
+        }
     }
 
     /// Adopts the password-related metadata of the remote vault after verifying it wraps the

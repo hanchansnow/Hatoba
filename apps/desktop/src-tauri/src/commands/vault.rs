@@ -30,6 +30,9 @@ fn check_new_password(field: &str, password: &str) -> AppResult<()> {
 
 /// Common work after any successful unlock (password, recovery code, biometrics, restore).
 pub(crate) fn after_unlock(app: &AppHandle, state: &AppState) {
+    if !state.vault().is_unlocked() {
+        return;
+    }
     // Only when sync is off; otherwise `sync::run_round` does it after pulling.
     if let Err(e) = state.with_unlocked(adopt_legacy_prefs_after_unlock) {
         tracing::warn!(
@@ -84,16 +87,19 @@ pub async fn vault_create(
     password: String,
 ) -> AppResult<String> {
     let _operation = state.lifecycle_operation()?;
+    let generation = state.vault().lock_generation();
     check_new_password("password", &password)?;
     let password = Zeroizing::new(password);
     let vault = state.vault.clone();
     let code = blocking(move || {
-        Ok(vault
+        let mut vault = vault
             .lock()
-            .map_err(|_| AppError::internal("vault poisoned"))?
-            .create(&password)?)
+            .map_err(|_| AppError::internal("vault poisoned"))?;
+        vault.ensure_lock_generation(generation)?;
+        Ok(vault.create(&password)?)
     })
     .await?;
+    state.with_lock_generation(generation, |_| Ok(()))?;
     after_unlock(&app, &state);
     Ok(code.to_string())
 }
@@ -107,15 +113,18 @@ pub async fn vault_unlock(
     password: String,
 ) -> AppResult<()> {
     let _operation = state.lifecycle_operation()?;
+    let generation = state.vault().lock_generation();
     let password = Zeroizing::new(password);
     let vault = state.vault.clone();
     blocking(move || {
-        Ok(vault
+        let mut vault = vault
             .lock()
-            .map_err(|_| AppError::internal("vault poisoned"))?
-            .unlock(&password)?)
+            .map_err(|_| AppError::internal("vault poisoned"))?;
+        vault.ensure_lock_generation(generation)?;
+        Ok(vault.unlock(&password)?)
     })
     .await?;
+    state.with_lock_generation(generation, |_| Ok(()))?;
     after_unlock(&app, &state);
     Ok(())
 }
@@ -125,8 +134,10 @@ pub async fn vault_unlock(
 #[specta::specta]
 pub async fn vault_unlock_biometric(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     let _operation = state.lifecycle_operation()?;
+    let generation = state.vault().lock_generation();
     let key = biometric::unlock(&app, state.secrets.as_ref()).await?;
-    state.vault().unlock_with_vault_key(key)?;
+    state.with_lock_generation(generation, |vault| Ok(vault.unlock_with_vault_key(key)?))?;
+    state.with_lock_generation(generation, |_| Ok(()))?;
     after_unlock(&app, &state);
     Ok(())
 }
@@ -204,17 +215,19 @@ pub async fn vault_recover(
     new_password: String,
 ) -> AppResult<()> {
     let _operation = state.lifecycle_operation()?;
+    let generation = state.vault().lock_generation();
     check_new_password("new_password", &new_password)?;
     let config = state.vault().sync_config()?;
     match config {
         Some(cfg) => {
             let backend = sync::backend_for(&cfg, state.secrets.as_ref())?;
-            let session = flows::recover_remote(
+            let session = flows::recover_remote_at_generation(
                 &state.vault,
                 backend.as_ref(),
                 &recovery_code,
                 &new_password,
                 sync::device_info(),
+                generation,
             )
             .await?;
             save_session(state.secrets.as_ref(), &session)?;
@@ -223,10 +236,14 @@ pub async fn vault_recover(
             let (code, pw) = (Zeroizing::new(recovery_code), Zeroizing::new(new_password));
             let vault = state.vault.clone();
             blocking(move || {
-                vault
+                let mut vault = vault
                     .lock()
-                    .map_err(|_| AppError::internal("vault poisoned"))?
-                    .recover(&code, &pw)?;
+                    .map_err(|_| AppError::internal("vault poisoned"))?;
+                let stay_locked = vault.lock_generation() != generation;
+                vault.recover(&code, &pw)?;
+                if stay_locked {
+                    vault.lock();
+                }
                 Ok(())
             })
             .await?;
@@ -246,17 +263,24 @@ pub async fn vault_restore_from_cloud(
     password: String,
 ) -> AppResult<()> {
     let _operation = state.lifecycle_operation()?;
+    let generation = state.vault().lock_generation();
     let (cfg, backend) = backend_from_input(&config)?;
-    let session = flows::restore_from_cloud(
+    let session = flows::restore_from_cloud_at_generation(
         &state.vault,
         backend.as_ref(),
         &password,
         sync::device_info(),
         &cfg,
+        generation,
     )
     .await?;
     persist(&state, &cfg, &config, &session)?;
-    state.sync.set_backend(Some(Arc::clone(&backend)));
+    {
+        let vault = state.vault();
+        if vault.is_unlocked() {
+            state.sync.set_backend(Some(Arc::clone(&backend)));
+        }
+    }
     // The first pull is an ordinary round: if it fails, the sync status shows why and the
     // scheduler resumes from the saved cursor, so the restore itself has succeeded.
     let _ = sync::run_round(&app).await;

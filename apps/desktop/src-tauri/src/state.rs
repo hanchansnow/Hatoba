@@ -24,6 +24,7 @@ pub struct AppState {
     pub vault: SharedVault,
     pub backups: crate::backup::Backups,
     /// Serializes key and connection changes with restore, including awaited work.
+    /// Lock requests bypass this gate so prompts and network work cannot delay locking.
     pub lifecycle: tokio::sync::Mutex<()>,
     pub secrets: Arc<KeyringStore>,
     pub ssh: SshManager,
@@ -75,6 +76,17 @@ impl AppState {
     /// own invariants are transactional, so recovering the guard is safe.
     pub fn vault(&self) -> MutexGuard<'_, Vault> {
         self.vault.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Checks and uses an operation's lock generation under the same vault mutex.
+    pub fn with_lock_generation<R>(
+        &self,
+        expected: u64,
+        f: impl FnOnce(&mut Vault) -> AppResult<R>,
+    ) -> AppResult<R> {
+        let mut vault = self.vault();
+        vault.ensure_lock_generation(expected)?;
+        f(&mut vault)
     }
 
     /// Runs `f` with the vault, requiring it to be unlocked.

@@ -27,6 +27,34 @@ static NSDictionary *inspect(NSURL *url) {
     return cloudState(values);
 }
 
+// A downloaded flag alone is insufficient: placeholders must have become readable files.
+// Callbacks let the native regression harness exercise failures without an iCloud account.
+static NSDictionary *downloadBackup(NSURL *url,
+        NSDictionary *(^inspectFile)(NSURL *),
+        BOOL (^startDownload)(NSURL *, NSError **),
+        BOOL (^available)(NSURL *), void (^wait)(void)) {
+    NSDictionary *state = inspectFile(url);
+    BOOL local = available(url);
+    if (state[@"error"] && local) return state;
+    if (!state[@"error"] && [state[@"downloaded"] boolValue] && local)
+        return @{ @"ok": @YES };
+
+    // A missing logical path can be an evicted iCloud placeholder whose status is unknown.
+    NSError *error = nil;
+    if (!startDownload(url, &error) || error)
+        return @{ @"error": @"Unable to start downloading the iCloud backup." };
+
+    // Poll outside file coordination. A fixed budget cannot be extended by clock changes.
+    for (NSUInteger attempt = 0; attempt < 150; attempt++) {
+        state = inspectFile(url);
+        if (state[@"error"]) return state;
+        if ([state[@"downloaded"] boolValue] && available(url))
+            return @{ @"ok": @YES };
+        wait();
+    }
+    return @{ @"error": @"The iCloud file is still downloading. Try again shortly." };
+}
+
 char *hatoba_icloud(const char *input) {
     @autoreleasepool {
         NSData *data = [NSData dataWithBytes:input length:strlen(input)];
@@ -38,19 +66,15 @@ char *hatoba_icloud(const char *input) {
         if ([operation isEqual:@"inspect"]) {
             result = inspect(url);
         } else if ([operation isEqual:@"download"]) {
-            NSError *error = nil;
-            NSDictionary *state = inspect(url);
-            if ([state[@"ubiquitous"] boolValue] && ![state[@"downloaded"] boolValue]) {
-                [fm startDownloadingUbiquitousItemAtURL:url error:&error];
-                // Poll outside file coordination, so the iCloud daemon can finish its write.
-                NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:30];
-                while (!error && ![inspect(url)[@"downloaded"] boolValue]
-                        && deadline.timeIntervalSinceNow > 0) [NSThread sleepForTimeInterval:0.2];
-                if (!error && ![inspect(url)[@"downloaded"] boolValue]) {
-                    result = @{ @"error": @"The iCloud file is still downloading. Try again shortly." };
-                }
-            }
-            if (!result) result = error ? @{ @"error": @"Unable to download the iCloud backup." } : @{ @"ok": @YES };
+            result = downloadBackup(url, ^NSDictionary *(NSURL *file) {
+                return inspect(file);
+            }, ^BOOL(NSURL *file, NSError **error) {
+                return [fm startDownloadingUbiquitousItemAtURL:file error:error];
+            }, ^BOOL(NSURL *file) {
+                NSDictionary *attributes = [fm attributesOfItemAtPath:file.path error:nil];
+                return [attributes[NSFileType] isEqual:NSFileTypeRegular]
+                    && [fm isReadableFileAtPath:file.path];
+            }, ^{ [NSThread sleepForTimeInterval:0.2]; });
         } else if ([operation isEqual:@"move"]) {
             NSURL *other = [NSURL fileURLWithPath:request[@"other"] ?: @""];
             NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];

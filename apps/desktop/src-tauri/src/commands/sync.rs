@@ -165,7 +165,12 @@ pub async fn sync_configure(
     )
     .await?;
     persist(&state, &cfg, &config, &session)?;
-    state.sync.set_backend(Some(backend));
+    {
+        let vault = state.vault();
+        if vault.is_unlocked() {
+            state.sync.set_backend(Some(backend));
+        }
+    }
     sync::emit_status(&app);
     sync::trigger(&app, Trigger::Manual);
     Ok(())

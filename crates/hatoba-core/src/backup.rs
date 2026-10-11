@@ -270,6 +270,26 @@ impl Vault {
         verified: VerifiedBackup,
         replace: bool,
     ) -> Result<()> {
+        self.apply_verified_backup(verified, replace, None)
+    }
+
+    /// Commits the verified snapshot but keeps it locked if a newer lock was requested.
+    /// The caller holds the shared vault mutex through this check and the transaction.
+    pub fn restore_verified_backup_preserving_lock(
+        &mut self,
+        verified: VerifiedBackup,
+        replace: bool,
+        expected_generation: u64,
+    ) -> Result<()> {
+        self.apply_verified_backup(verified, replace, Some(expected_generation))
+    }
+
+    fn apply_verified_backup(
+        &mut self,
+        verified: VerifiedBackup,
+        replace: bool,
+        expected_generation: Option<u64>,
+    ) -> Result<()> {
         if self.is_initialized() && !replace {
             return Err(Error::VaultAlreadyInitialized);
         }
@@ -317,7 +337,12 @@ impl Vault {
             Ok(())
         })?;
         // Every row was decoded before committing; installing the verified map cannot fail.
-        self.install_backup_unlock(vault_key, std::mem::take(&mut items.0));
+        if expected_generation.is_none_or(|expected| self.lock_generation() == expected) {
+            self.install_backup_unlock(vault_key, std::mem::take(&mut items.0));
+        } else {
+            // Both the key and the verified plaintext owner are wiped on this path.
+            self.unlocked = None;
+        }
         Ok(())
     }
 }
@@ -486,6 +511,36 @@ mod tests {
             original["items"],
             serde_json::to_value(source.backup_snapshot().unwrap()).unwrap()["items"]
         );
+    }
+
+    #[test]
+    fn restore_preserves_a_lock_requested_during_the_safety_write() {
+        let (source, host, _) = populated();
+        for newer_lock in [false, true] {
+            let (mut destination, _, _) = populated();
+            destination.lock(); // Restore's own lock before the awaited safety write.
+            let generation = destination.lock_generation();
+            if newer_lock {
+                destination.lock(); // Sleep/manual/idle request while already locked.
+            }
+            WIPED_ITEMS.with(|count| count.set(0));
+            destination
+                .restore_verified_backup_preserving_lock(
+                    source.backup_snapshot().unwrap().verify(PW).unwrap(),
+                    true,
+                    generation,
+                )
+                .unwrap();
+            assert_eq!(destination.is_unlocked(), !newer_lock);
+            if newer_lock {
+                assert!(WIPED_ITEMS.with(|count| count.get()) > 0);
+                destination.unlock(PW).unwrap();
+            }
+            assert_eq!(
+                destination.get(&host).unwrap().display_name(),
+                "backup-host-name"
+            );
+        }
     }
 
     #[test]

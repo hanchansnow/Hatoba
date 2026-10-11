@@ -2230,3 +2230,58 @@ async fn a_message_part_in_the_conflict_log_has_no_data_and_restoring_it_keeps_i
     converge(&a, &b).await;
     assert_eq!(entries(&a, &conv)[0].1, "from-a");
 }
+
+#[tokio::test]
+async fn sleep_lock_during_cloud_authentication_finishes_restore_but_keeps_it_locked() {
+    let (_, _, a, b) = world();
+    let id = a.put(host("preserved-cloud-host"));
+    enable(&a).await;
+    let shared = b.vault.clone();
+    b.backend
+        .on_next_meta(move || lock_vault(&shared).unwrap().lock());
+    restore_from_cloud(&b.vault, &b.backend, PW, b.info(), &config())
+        .await
+        .unwrap();
+    assert!(!b.v().is_unlocked());
+    assert!(b.v().status().initialized);
+    b.v().unlock(PW).unwrap();
+    b.sync().await;
+    assert_eq!(
+        b.v().get(&id).unwrap().display_name(),
+        "preserved-cloud-host"
+    );
+}
+
+#[tokio::test]
+async fn lock_during_remote_recovery_never_reinstalls_the_key() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(T0));
+    let mut vault = Vault::open_in_memory().unwrap().with_clock(clock.clone());
+    let code = vault
+        .create_with_params(PW, KdfParams::for_tests())
+        .unwrap()
+        .to_string();
+    let a = Dev {
+        vault: share(vault),
+        backend: FakeBackend::new(&server),
+        clock,
+        name: "recovery-device",
+    };
+    enable(&a).await;
+    a.v().lock();
+    let shared = a.vault.clone();
+    a.backend
+        .on_next_meta_update(move || lock_vault(&shared).unwrap().lock());
+    recover_remote(
+        &a.vault,
+        &a.backend,
+        &code,
+        "replacement-password",
+        a.info(),
+    )
+    .await
+    .unwrap();
+    assert!(!a.v().is_unlocked());
+    a.v().unlock("replacement-password").unwrap();
+    a.sync().await;
+}

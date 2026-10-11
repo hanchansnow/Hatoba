@@ -28,7 +28,21 @@ export async function boot() {
 
 /** Called after create / unlock / restore: load vault data and sync status, then show the main UI. */
 export async function enterUnlocked() {
-  await useVaultData.getState().reload();
+  const vault = await useApp.getState().refreshVault();
+  if (vault.state !== "unlocked") {
+    useVaultData.getState().clear();
+    useApp.setState({ phase: vault.state === "uninitialized" ? "onboarding" : "locked" });
+    return;
+  }
+  try {
+    await useVaultData.getState().reload();
+  } catch (error) {
+    const current = await useApp.getState().refreshVault();
+    if (current.state === "unlocked") throw error;
+    useVaultData.getState().clear();
+    useApp.setState({ phase: current.state === "uninitialized" ? "onboarding" : "locked" });
+    return;
+  }
   try {
     useApp.getState().setSync(await api.sync_status());
   } catch {
@@ -41,6 +55,7 @@ export async function enterUnlocked() {
       /* backup status is optional */
     }
   }
-  void useApp.getState().refreshVault();
-  useApp.setState({ phase: "unlocked" });
+  const current = await useApp.getState().refreshVault();
+  if (current.state !== "unlocked") useVaultData.getState().clear();
+  useApp.setState({ phase: current.state === "unlocked" ? "unlocked" : current.state === "uninitialized" ? "onboarding" : "locked" });
 }

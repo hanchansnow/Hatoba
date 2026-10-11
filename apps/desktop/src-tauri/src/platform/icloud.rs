@@ -130,3 +130,60 @@ fn fixed_directory(drive: &Path, create: bool) -> AppResult<std::path::PathBuf> 
     }
     Ok(canonical)
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod download_tests {
+    use super::*;
+    struct Directory(std::path::PathBuf);
+    impl Directory {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("hatoba-native-download-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn native_download_handles_unknown_status_failure_materialization_and_timeout() {
+        let directory = Directory::new();
+        let binary = directory.0.join("download-tests");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/platform/icloud_tests.m");
+        let compiled = std::process::Command::new("xcrun")
+            .args(["clang", "-fobjc-arc", "-framework", "Foundation"])
+            .arg(source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let output = std::process::Command::new(binary).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn the_actual_bridge_rejects_missing_files_and_accepts_readable_local_files() {
+        let directory = Directory::new();
+        let source = directory.0.join("snapshot.hatoba-backup");
+        let target = directory.0.join("staged.hatoba-backup");
+        assert!(call("download", &source, None).is_err());
+        assert!(read(&source, &target).is_err());
+        assert!(!target.exists());
+        std::fs::write(&source, b"encrypted fixture bytes").unwrap();
+        read(&source, &target).unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"encrypted fixture bytes");
+    }
+}

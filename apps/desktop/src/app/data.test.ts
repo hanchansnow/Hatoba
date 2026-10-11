@@ -45,3 +45,14 @@ describe("reloadHosts", () => {
     expect(useVaultData.getState().hosts.map((h) => h.id)).toEqual(["fresh"]);
   });
 });
+
+
+describe("full reload", () => {
+  it("does not repopulate data after locking clears the vault", async () => {
+    const done = useVaultData.getState().reload();
+    useVaultData.getState().clear();
+    backend.pending.shift()!([host("late")]);
+    await done;
+    expect(useVaultData.getState()).toMatchObject({ loaded: false, hosts: [] });
+  });
+});

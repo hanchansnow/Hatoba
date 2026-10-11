@@ -271,7 +271,12 @@ pub async fn deploy_setup(
             worker_name: deployed.worker_name,
         }),
     }))?;
-    state.sync.set_backend(Some(Arc::new(backend)));
+    {
+        let vault = state.vault();
+        if vault.is_unlocked() {
+            state.sync.set_backend(Some(Arc::new(backend)));
+        }
+    }
     drop(deployment);
     state.deploy.end(&handle);
     sync::emit_status(&app);

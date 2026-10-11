@@ -145,7 +145,11 @@ pub async fn enable_sync(
         return Err(Error::RemoteInitialized);
     }
 
-    sync_round(vault, backend, &SyncOptions::default()).await?;
+    // Locking defers plaintext work until the next unlock; completed remote work is retained.
+    match sync_round(vault, backend, &SyncOptions::default()).await {
+        Ok(_) | Err(Error::Locked) => {}
+        Err(error) => return Err(error),
+    }
     Ok(session)
 }
 
@@ -221,7 +225,7 @@ async fn authenticate(
 /// Derives keys from the remote's salt and the master password, logs in, unwraps the vault key
 /// with `enc_key`, and writes the vault metadata locally under a new device id together with
 /// `config`, in one transaction. The vault is left unlocked and the local master password becomes
-/// the remote one.
+/// the remote one. A lock requested during authentication is preserved.
 ///
 /// Items are not pulled here: the caller stores the returned session and then runs an ordinary
 /// sync round. Once this returns, the device is a configured sync device, so an interrupted
@@ -237,6 +241,19 @@ pub async fn restore_from_cloud(
     device: DeviceInfo,
     config: &SyncConfig,
 ) -> Result<Session> {
+    let generation = with_vault(vault, |v| Ok(v.lock_generation()))?;
+    restore_from_cloud_at_generation(vault, backend, password, device, config, generation).await
+}
+
+/// Completes restore while preserving a lock requested since the desktop operation began.
+pub async fn restore_from_cloud_at_generation(
+    vault: &SharedVault,
+    backend: &dyn SyncBackend,
+    password: &str,
+    device: DeviceInfo,
+    config: &SyncConfig,
+    generation: u64,
+) -> Result<Session> {
     with_vault(vault, |v| {
         if v.status().initialized {
             Err(Error::VaultAlreadyInitialized)
@@ -247,7 +264,13 @@ pub async fn restore_from_cloud(
     let device_id = new_id();
     let auth = authenticate(backend, password, &device_id, &device).await?;
     with_vault(vault, |v| {
-        v.install_remote_vault(&auth.meta, auth.vault_key, &device_id, Some(config))
+        v.install_remote_vault(
+            &auth.meta,
+            auth.vault_key,
+            &device_id,
+            Some(config),
+            generation,
+        )
     })?;
     Ok(auth.session)
 }
@@ -383,6 +406,19 @@ pub async fn recover_remote(
     new_password: &str,
     device: DeviceInfo,
 ) -> Result<Session> {
+    let generation = with_vault(vault, |v| Ok(v.lock_generation()))?;
+    recover_remote_at_generation(vault, backend, code, new_password, device, generation).await
+}
+
+/// Completes password recovery while preserving a lock since the caller started work.
+pub async fn recover_remote_at_generation(
+    vault: &SharedVault,
+    backend: &dyn SyncBackend,
+    code: &str,
+    new_password: &str,
+    device: DeviceInfo,
+    generation: u64,
+) -> Result<Session> {
     let code = RecoveryCode::parse(code)?;
     let recovery_key = code.recovery_key();
     let recovery_auth = code.recovery_auth();
@@ -418,7 +454,7 @@ pub async fn recover_remote(
 
     with_vault(vault, |v| {
         if existing {
-            v.apply_recovered_password(&change, vault_key.clone(), &recovery_auth)
+            v.apply_recovered_password(&change, vault_key.clone(), &recovery_auth, Some(generation))
         } else {
             let meta = VaultMeta {
                 schema_version: crate::store::SCHEMA_VERSION,
@@ -428,14 +464,18 @@ pub async fn recover_remote(
                 recovery_vault_key: recovered.recovery_vault_key.clone(),
                 seq: 0,
             };
-            v.install_remote_vault(&meta, vault_key.clone(), &device_id, None)
+            v.install_remote_vault(&meta, vault_key.clone(), &device_id, None, generation)
         }
     })?;
 
     // The server revoked every session, including the restricted one: log in with the new password.
     let login = device_login(&vault_key, &device_id, &device)?;
     let session = backend.login(&change.auth_key, &login).await?;
-    sync_round(vault, backend, &SyncOptions::default()).await?;
+    // Locking defers plaintext work until the next unlock; completed remote work is retained.
+    match sync_round(vault, backend, &SyncOptions::default()).await {
+        Ok(_) | Err(Error::Locked) => {}
+        Err(error) => return Err(error),
+    }
     Ok(session)
 }
 
