@@ -598,7 +598,7 @@ pub fn status(state: &AppState, retry: bool) -> AppResult<ICloudBackupStatus> {
             }
         }
     } else if cfg.enabled {
-        error = Some(root.err().expect("failed directory").detail);
+        error = Some(root.expect_err("failed directory").detail);
     }
     devices.sort_by_key(|device| !device.current);
     let entries = devices
