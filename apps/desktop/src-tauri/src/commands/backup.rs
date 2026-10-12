@@ -139,7 +139,9 @@ pub async fn icloud_backup_restore(
     {
         let mut vault = state.vault();
         state.ai.stop_all(&mut vault);
-        vault.restore_verified_backup_preserving_lock(verified, replace, expected_generation)?;
+        vault
+            .restore_verified_backup_preserving_lock(verified, replace, expected_generation)
+            .map_err(|error| AppError::from(error).with_safety_backup(rollback.clone()))?;
     }
     // Invalidate any backend captured before the swap while rounds are still excluded.
     state.sync.set_backend(None);

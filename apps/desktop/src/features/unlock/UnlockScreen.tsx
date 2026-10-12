@@ -100,7 +100,7 @@ export function UnlockScreen() {
     }
   };
 
-  const message = throttled ? t("err.throttled", { s: remaining }) : error;
+  const message = busy ? t("vault.unlock.progress") : throttled ? t("err.throttled", { s: remaining }) : error;
   const biometricLabel = platform === "macos" ? t("vault.unlock.touchId") : t("vault.unlock.hello");
 
   return (
@@ -136,7 +136,7 @@ export function UnlockScreen() {
               {busy ? <Spinner size={13} /> : <Icon name="arrow-right" />}
             </button>
           </div>
-          <div className={s.message} role="alert" aria-live="assertive">
+          <div className={s.message} role={busy ? "status" : "alert"} aria-live={busy ? "polite" : "assertive"}>
             {message}
           </div>
 

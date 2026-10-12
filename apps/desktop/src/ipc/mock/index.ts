@@ -26,6 +26,7 @@ import { createAiExtensionsMock } from "./aiExtensions";
 import { createAiSettingsMock } from "./aiSettings";
 import * as D from "./data";
 import { mockStats } from "./data";
+import { applyPatch } from "./patch";
 import { FakeShell } from "./shell";
 
 /** `?ssh=<kind>`: every connection fails with this SSH error kind and a detail like the real one. */
@@ -73,6 +74,7 @@ export function createMockApi(): HatobaApi {
   let backupAutomatic = false;
   let backupRetention = 5;
   const backupEntries: ICloudBackupEntry[] = [];
+  const backupDemo = q.get("backup");
   const platformParam = q.get("platform");
   const platform = platformParam === "macos" || platformParam === "linux" || platformParam === "windows" ? platformParam : "windows";
   const demo = q.get("state");
@@ -160,17 +162,25 @@ export function createMockApi(): HatobaApi {
     }
   }
 
-  const backupChecks = new Map<string, number>();
+  const backupChecks = new Map<string, { checks: number; at: number }>();
   function backupStatus(retry = false) {
-    const entries = backupEntries.map((entry) => {
-      if (entry.transfer === "uploaded") return { ...entry };
-      const checks = retry ? 1 : Math.min(5, (backupChecks.get(entry.name) ?? 0) + 1);
-      backupChecks.set(entry.name, checks);
-      return { ...entry, transfer: checks === 5 ? entry.transfer === "error" ? "error" : "timeout"
-        : entry.transfer === "error" ? "pending" : entry.transfer };
-    });
+    for (const entry of backupEntries) {
+      if (entry.transfer === "uploaded") continue;
+      if (retry) backupChecks.delete(entry.name);
+      const previous = backupChecks.get(entry.name);
+      if (previous && (previous.checks >= 5 || Date.now() - previous.at < 2000)) continue;
+      const checks = (previous?.checks ?? 0) + 1;
+      backupChecks.set(entry.name, { checks, at: Date.now() });
+      entry.transfer = backupDemo === "error" || backupDemo === "timeout"
+        ? checks >= 5 ? backupDemo : backupDemo === "error" ? "pending" : "uploading"
+        : checks >= 3 ? "uploaded" : checks === 2 ? "uploading" : "pending";
+    }
+    if (backupEntries[0]?.transfer === "uploaded") {
+      for (const entry of backupEntries.splice(backupRetention)) backupChecks.delete(entry.name);
+    }
+    const entries = backupEntries.map((entry) => ({ ...entry }));
     const last_at = entries[0]?.created_at ?? null;
-    const last_uploaded_at = entries.filter((entry) => entry.transfer === "uploaded")[0]?.created_at ?? null;
+    const last_uploaded_at = entries.find((entry) => entry.transfer === "uploaded")?.created_at ?? null;
     return { enabled: backupEnabled, automatic: backupAutomatic, retention: backupRetention, last_at, last_uploaded_at, error: null, entries,
       devices: [{ device_id: "demo", name: "Demo Mac", platform: "macOS", current: true, last_at, last_uploaded_at, entries, error: null }],
     };
@@ -329,7 +339,9 @@ export function createMockApi(): HatobaApi {
       if (retention !== undefined && (!Number.isInteger(retention) || retention < 1 || retention > 4294967295)) fail("invalid_input");
       backupEnabled = enabled; backupAutomatic = automatic;
       if (retention !== undefined) backupRetention = retention;
-      if (enabled && backupEntries[0]?.transfer === "uploaded") backupEntries.splice(backupRetention);
+      if (enabled && backupEntries[0]?.transfer === "uploaded") {
+        for (const entry of backupEntries.splice(backupRetention)) backupChecks.delete(entry.name);
+      }
     },
     icloud_backup_now: async () => {
       if (!backupEnabled) fail("invalid_input");
@@ -798,14 +810,27 @@ export function createMockApi(): HatobaApi {
       if (config.kind === "d1") {
         if (config.api_token.length < 20)
           return { ok: false, initialized: false, version: null, latency_ms: null, databases: null, error: { code: "sync", detail: "token lacks D1 edit permission" } };
-        return { ok: true, initialized: demo === "onboarding", version: null, latency_ms: 64, databases: [{ id: "3f8a2c91-d04e-4b7a-a1e6-c5d2b9f07e13", name: "hatoba", region: "APAC" }], error: null };
+        return { ok: true, initialized: demo === "onboarding" || deployDemo === "vault", version: null, latency_ms: 64, databases: [{ id: "3f8a2c91-d04e-4b7a-a1e6-c5d2b9f07e13", name: "hatoba", region: "APAC" }], error: null };
       }
       if (!/^https?:\/\//.test(config.url) && !config.url.includes("."))
         return { ok: false, initialized: false, version: null, latency_ms: null, databases: null, error: { code: "sync_offline", detail: "dns" } };
-      // First-launch demo (flow B) restores from a remote that already holds a vault.
-      return { ok: true, initialized: demo === "onboarding", version: "0.1.0", latency_ms: 64, databases: null, error: null };
+      // First-launch demo (flow B) restores from a remote that already holds a vault, and so
+      // does `?deploy=vault` (flow C).
+      return { ok: true, initialized: demo === "onboarding" || deployDemo === "vault", version: "0.1.0", latency_ms: 64, databases: null, error: null };
     },
     sync_configure: async (config, password) => {
+      await delay(1200);
+      if (password.length < 4) fail("wrong_password");
+      sync = {
+        ...D.syncStatus(),
+        endpoint: config.kind === "worker" ? config.url.replace(/^https?:\/\//, "") : null,
+        database: config.kind === "d1" ? "hatoba" : "hatoba · APAC",
+        last_synced_at: Date.now(),
+        counts: { hosts: hosts.length, keys: keys.length, groups: groups.length },
+      };
+      emit("sync://status", sync);
+    },
+    sync_join: async (config, password) => {
       await delay(1200);
       if (password.length < 4) fail("wrong_password");
       sync = {
@@ -879,6 +904,7 @@ export function createMockApi(): HatobaApi {
         worker: fresh ? "create" : deployDemo === "vault" ? "has_vault" : deployDemo === "foreign" ? "foreign" : "create",
         database: "create",
         database_name: target.database_name,
+        vault_url: deployDemo === "vault" && !fresh ? `https://${target.worker_name}.kc.workers.dev` : null,
       };
     },
     deploy_run: async (handle, target, onProgress) => {
@@ -922,6 +948,19 @@ export function createMockApi(): HatobaApi {
       sync = {
         ...D.syncStatus(),
         endpoint: (d.url ?? "").replace(/^https?:\/\//, ""),
+        last_synced_at: Date.now(),
+        counts: { hosts: hosts.length, keys: keys.length, groups: groups.length },
+      };
+      deployment = null;
+      emit("sync://status", sync);
+    },
+    deploy_join: async (handle, target, password) => {
+      needDeployment(handle);
+      await delay(1200);
+      if (password.length < 4) fail("wrong_password");
+      sync = {
+        ...D.syncStatus(),
+        endpoint: `${target.worker_name}.kc.workers.dev`,
         last_synced_at: Date.now(),
         counts: { hosts: hosts.length, keys: keys.length, groups: groups.length },
       };
@@ -978,8 +1017,10 @@ export function createMockApi(): HatobaApi {
     },
 
     settings_get: async () => structuredClone(settings),
-    settings_save: async (next) => {
-      settings = structuredClone(next);
+    settings_save: async (patch) => {
+      const terminal = applyPatch(settings.terminal, patch.terminal);
+      if (JSON.stringify(terminal) === JSON.stringify(settings.terminal)) return;
+      settings = { ...settings, terminal };
       touch();
     },
     prefs_get: async () => prefs,

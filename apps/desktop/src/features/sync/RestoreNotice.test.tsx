@@ -6,16 +6,18 @@ import { setOverlaysLocked } from "@/components/overlay";
 import { setLocale } from "@/i18n";
 import { BackupRestore, ICloudBackup } from "./ICloudBackup";
 import { RestoreNotice } from "./RestoreNotice";
+import { readRestoreResult, writeRestoreResult } from "./restoreState";
 
 const mocks = vi.hoisted(() => {
   window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn() });
-  return { restore: vi.fn(), status: vi.fn(), listen: vi.fn(async () => () => {}) };
+  return { show: vi.fn(async () => {}), restore: vi.fn(), status: vi.fn(), listen: vi.fn(async () => () => {}) };
 });
 vi.mock("@/ipc/api", async (original) => ({ ...await original<typeof import("@/ipc/api")>(),
-  api: { icloud_backup_restore: mocks.restore, icloud_backup_status: mocks.status, listen: mocks.listen }, isTauri: () => false }));
+  api: { show_backup_in_finder: mocks.show, icloud_backup_restore: mocks.restore, icloud_backup_status: mocks.status, listen: mocks.listen }, isTauri: () => false }));
+vi.mock("@/app/boot", () => ({ enterUnlocked: vi.fn(async () => {}) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let cleanup: (() => void) | undefined;
-afterEach(() => { act(() => cleanup?.()); setOverlaysLocked(false); useApp.setState({ backupRestore: null }); });
+afterEach(() => { writeRestoreResult(null); act(() => cleanup?.()); setOverlaysLocked(false); useApp.setState({ backupRestore: null }); });
 function Harness() {
   const phase = useApp((state) => state.phase);
   const [closed, close] = useState(false);
@@ -61,4 +63,62 @@ it("shows histories from every device with the existing current-device badge and
   expect(restores).toHaveLength(2);
   act(() => restores[1].click());
   expect(document.querySelector("[role=alertdialog]")?.textContent).toContain("device-b/snapshot-b");
+});
+
+
+async function beginRestore() {
+  setLocale("en"); useApp.setState({ phase: "unlocked", backupRestore: null });
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  cleanup = () => { root.unmount(); host.remove(); };
+  act(() => root.render(<Harness />));
+  const input = document.querySelector<HTMLInputElement>("input[type=password]")!;
+  act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "backup-password"); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  const button = [...document.querySelectorAll("button")].find((button) => button.textContent === "Restore")!;
+  await act(async () => { button.click(); await Promise.resolve(); });
+  act(() => { setOverlaysLocked(true); useApp.setState({ phase: "locked" }); });
+}
+
+it("reveals the exact encrypted safety file after a failed transaction", async () => {
+  let reject!: (error: unknown) => void;
+  const path = "/Users/demo/restore-safety/before-restore.hatoba";
+  mocks.restore.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+  mocks.show.mockClear();
+  await beginRestore();
+  await act(async () => { reject({ code: "io", detail: "transaction failed", safety_backup: path }); });
+  expect(document.body.textContent).toContain(path);
+  const show = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("Show Safety"))!;
+  await act(async () => { show.click(); });
+  expect(mocks.show).toHaveBeenCalledWith(path);
+  expect(readRestoreResult()?.safetyBackup).toBe(path);
+});
+
+it("keeps the successful locked restore notice and backup-password explanation across reload", async () => {
+  let finish!: (path: string) => void;
+  const path = "/Users/demo/restore-safety/before-restore.hatoba";
+  mocks.restore.mockImplementation(() => new Promise((done) => { finish = done; }));
+  await beginRestore();
+  await act(async () => { finish(path); });
+  expect(useApp.getState().phase).toBe("locked");
+  expect(document.querySelector("[role=status]")?.textContent).toContain("master password");
+  const stored = readRestoreResult();
+  expect(stored).toMatchObject({ completed: true, running: false, error: null, safetyBackup: path });
+  expect(JSON.stringify(stored)).not.toContain("backup-password");
+  act(() => useApp.setState({ backupRestore: stored }));
+  expect(document.body.textContent).toContain("Vault restored");
+  const close = [...document.querySelectorAll("button")].find((button) => button.textContent === "Close")!;
+  act(() => close.click());
+  expect(readRestoreResult()).toBeNull();
+});
+
+
+it("lists authentication failures and clearly says the whole backup was not restored", async () => {
+  let reject!: (error: unknown) => void;
+  mocks.restore.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+  await beginRestore();
+  await act(async () => { reject({ code: "invalid_input", detail: "authentication failed",
+    backup_item_ids: ["failed-record-one", "failed-record-two"] }); });
+  expect(document.querySelector("[role=alert]")?.textContent).toContain("Nothing was restored");
+  expect(document.body.textContent).toContain("failed-record-one");
+  expect(document.body.textContent).toContain("failed-record-two");
+  expect(readRestoreResult()?.failedItems).toEqual(["failed-record-one", "failed-record-two"]);
 });

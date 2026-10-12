@@ -27,6 +27,10 @@ export type ErrorCode =
   | "sync_offline"
   | "remote_initialized"
   | "remote_not_initialized"
+  /** Another sync setup (flow A or C, §6.6) is still running. */
+  | "sync_setup_busy"
+  /** Sync is already on for this device, so it cannot join a cloud vault (flow C). */
+  | "sync_already_configured"
   | "cloudflare_token"
   | "cloudflare_permission"
   | "cloudflare"
@@ -93,6 +97,10 @@ export interface AppError {
   cf_code?: number | null;
   /** `ai`: the HTTP status the provider answered with, when it answered. */
   http_status?: number | null;
+  /** Completed encrypted safety copy for a failed restore. */
+  safety_backup?: string | null;
+  /** Authentication failures; the entire backup remains unapplied. */
+  backup_item_ids?: string[] | null;
 }
 
 export type CloudflarePermission = "workers_scripts" | "d1";
@@ -573,6 +581,8 @@ export interface DeployPlan {
   worker: DeployWorkerAction;
   database: DeployDatabaseAction | null;
   database_name: string | null;
+  /** For `has_vault`: the workers.dev URL to join it on (flow C); `null` when no workers.dev URL reaches the Worker. */
+  vault_url: string | null;
 }
 
 export type DeployStep = "verify" | "inspect" | "create_database" | "migrate" | "upload" | "setup_token" | "route" | "wait";
@@ -690,6 +700,14 @@ export interface TerminalSettings {
 /** Synced settings item (spec §5.1 `Settings`). */
 export interface SettingsView {
   terminal: TerminalSettings;
+}
+
+/**
+ * What `settings_save` changes. Only these fields are written, over the stored settings, so a window
+ * that read the settings before a sync pull keeps what other devices changed.
+ */
+export interface SettingsPatch {
+  terminal?: Partial<TerminalSettings>;
 }
 
 export type Language = "system" | "zh-CN" | "en" | "ja";
@@ -857,6 +875,9 @@ export interface AiSettingsView {
   /** Sent with every request, at most 32 KB of UTF-8 (AI-36). */
   custom_instructions: string;
 }
+
+/** What `ai_settings_save` changes, like {@link SettingsPatch}; null clears a field that can be empty. */
+export type AiSettingsPatch = Partial<AiSettingsView>;
 
 export type AiPermissionMode = "manual" | "bypass";
 

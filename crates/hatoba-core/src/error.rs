@@ -1,7 +1,7 @@
 //! The crate-wide error type.
 //!
 //! Error messages never contain secrets, item contents, envelopes or tokens (SEC-04): at most an
-//! item id or a short, server-supplied error code.
+//! validated item IDs or a short, server-supplied error code.
 
 use crate::sync::deploy::Permission;
 
@@ -56,6 +56,12 @@ pub enum Error {
     /// An envelope or key blob failed to authenticate / decrypt.
     #[error("decryption failed")]
     Decrypt,
+    /// Backup rows whose envelopes could not be authenticated; no restore was committed.
+    #[error("backup item authentication failed")]
+    BackupAuthentication {
+        /// Validated public record IDs; never names or decrypted contents.
+        item_ids: Vec<String>,
+    },
     /// Malformed envelope, key blob, KDF parameters or similar persisted/wire format.
     #[error("invalid data: {0}")]
     Format(String),
@@ -96,8 +102,8 @@ pub enum Error {
     /// The remote has no vault yet (`/v1/prelogin` answered 404).
     #[error("the remote has not been initialised")]
     RemoteNotInitialized,
-    /// The remote already holds a vault (health says so, or setup answered 409). MVP flow C:
-    /// the user should use "restore from cloud" on a new device instead.
+    /// The remote already holds a vault (health says so, or setup answered 409). Joining it is
+    /// flow C (`sync::join_remote_vault`).
     #[error("the remote already holds a vault")]
     RemoteInitialized,
     /// 429 from the Worker.
@@ -109,6 +115,9 @@ pub enum Error {
     /// Sync is not configured on this device.
     #[error("sync is not configured")]
     SyncNotConfigured,
+    /// Sync is already set up on this device, so it cannot join a cloud vault.
+    #[error("sync is already set up on this device")]
+    SyncAlreadyConfigured,
     /// Any other server-side failure; the string is a short code, never user data.
     #[error("sync server error: {0}")]
     Server(String),
@@ -179,6 +188,7 @@ impl Error {
             Self::VaultMismatch => "vault_mismatch",
             Self::RecoveryMaterialMissing => "recovery_material_missing",
             Self::Decrypt => "decrypt_failed",
+            Self::BackupAuthentication { .. } => "backup_authentication",
             Self::Format(_) => "invalid_format",
             Self::UnsupportedVersion(_) => "unsupported_version",
             Self::WeakKdfParams(_) => "weak_kdf_params",
@@ -194,6 +204,7 @@ impl Error {
             Self::RemoteInitialized => "remote_initialized",
             Self::RateLimited { .. } => "rate_limited",
             Self::SyncNotConfigured => "sync_not_configured",
+            Self::SyncAlreadyConfigured => "sync_already_configured",
             Self::Server(_) => "server",
             Self::Protocol(_) => "protocol",
             Self::InvalidUrl(_) => "invalid_url",

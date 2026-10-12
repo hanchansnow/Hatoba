@@ -23,7 +23,7 @@ use crate::crypto::{AAD_VAULT_KEY, KdfParams, MasterKeys, decode_salt, unwrap_ke
 use crate::error::{Error, Result};
 use crate::model::new_id;
 use crate::store::{ItemRow, Store, StoreOps, meta};
-use crate::vault::{Vault, decode_envelope, seal_vault_check};
+use crate::vault::{Vault, seal_vault_check};
 
 /// Value of the `format` field.
 pub const BACKUP_FORMAT: &str = "hatoba-backup";
@@ -220,6 +220,7 @@ impl BackupFile {
         }
         let mut seen = HashSet::new();
         let mut items = DecryptedItems::default();
+        let mut failed_ids = Vec::new();
         for row in &self.items {
             if !(1..=64).contains(&row.id.len())
                 || !row
@@ -232,14 +233,33 @@ impl BackupFile {
                 return Err(Error::Format("invalid or duplicate backup item".into()));
             }
             if !row.deleted {
-                let envelope = row
-                    .envelope
-                    .as_deref()
-                    .ok_or_else(|| Error::Format("missing item envelope".into()))?;
-                let mut item = decode_envelope(&vault_key, &row.id, envelope)?;
-                item.strip_message_data();
-                items.0.insert(row.id.clone(), item);
+                let Some(envelope) = row.envelope.as_deref() else {
+                    failed_ids.push(row.id.clone());
+                    continue;
+                };
+                // Authenticate every row, including types written by a newer client.
+                // Keep unsupported ciphertext in `file`, as the live vault does on unlock.
+                let plain = match crate::crypto::open_json(
+                    &vault_key,
+                    crate::crypto::item_aad(&row.id).as_bytes(),
+                    envelope,
+                ) {
+                    Ok(plain) => plain,
+                    Err(_) => {
+                        failed_ids.push(row.id.clone());
+                        continue;
+                    }
+                };
+                if let Ok(mut item) = crate::model::Item::from_plaintext(&plain) {
+                    item.strip_message_data();
+                    items.0.insert(row.id.clone(), item);
+                }
             }
+        }
+        if !failed_ids.is_empty() {
+            return Err(Error::BackupAuthentication {
+                item_ids: failed_ids,
+            });
         }
         Ok(VerifiedBackup {
             file: self,
@@ -264,7 +284,8 @@ impl Vault {
     }
 
     /// Atomically applies a verified backup; replacement must have been explicitly confirmed.
-    /// Clears cloud connection and device-specific encrypted state, preserving local UI preferences.
+    /// Clears cloud connection and device-specific encrypted state.
+    /// Local UI preferences are preserved.
     pub fn restore_verified_backup(
         &mut self,
         verified: VerifiedBackup,
@@ -336,7 +357,7 @@ impl Vault {
             }
             Ok(())
         })?;
-        // Every row was decoded before committing; installing the verified map cannot fail.
+        // All envelopes were authenticated; supported rows form the verified decrypted cache.
         if expected_generation.is_none_or(|expected| self.lock_generation() == expected) {
             self.install_backup_unlock(vault_key, std::mem::take(&mut items.0));
         } else {
@@ -580,5 +601,113 @@ mod tests {
             0,
             "the successfully installed map was transferred to Unlocked's wiping owner"
         );
+    }
+
+    #[test]
+    fn authenticated_unknown_items_survive_restore_and_reexport() {
+        let (mut source, host, _) = populated();
+        let id = "future-item";
+        let envelope = crate::crypto::seal(
+            &source.vault_key_copy().unwrap(),
+            crate::crypto::item_aad(id).as_bytes(),
+            br#"{"type":"future-client-kind","content":"keep this encrypted"}"#,
+        )
+        .unwrap()
+        .to_json();
+        source
+            .store
+            .upsert_item_row(&ItemRow {
+                id: id.into(),
+                envelope: Some(envelope.clone()),
+                deleted: false,
+                revision: 3,
+                dirty: false,
+                updated_at: 42,
+            })
+            .unwrap();
+        source.lock();
+        source.unlock(PW).unwrap();
+        assert!(source.get(id).is_none());
+        assert!(source.get(&host).is_some());
+
+        let verified = source.backup_snapshot().unwrap().verify(PW).unwrap();
+        let mut destination = Vault::open_in_memory().unwrap();
+        destination
+            .restore_verified_backup(verified, false)
+            .unwrap();
+        assert_eq!(
+            destination.get(&host).unwrap().display_name(),
+            "backup-host-name"
+        );
+        assert!(destination.get(id).is_none());
+        destination.lock();
+        destination.unlock(PW).unwrap();
+        let row = destination
+            .backup_snapshot()
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.envelope, Some(envelope));
+        assert_eq!(row.updated_at, 42);
+        assert!(!row.deleted);
+        assert!(destination.get(&host).is_some());
+    }
+
+    #[test]
+    fn unknown_type_does_not_bypass_envelope_authentication() {
+        let (source, _, _) = populated();
+        let mut snapshot = source.backup_snapshot().unwrap();
+        let envelope = crate::crypto::seal(
+            &source.vault_key_copy().unwrap(),
+            crate::crypto::item_aad("original-id").as_bytes(),
+            br#"{"type":"future-kind"}"#,
+        )
+        .unwrap()
+        .to_json();
+        snapshot.items.push(BackupItem {
+            id: "substituted-id".into(),
+            envelope: Some(envelope),
+            deleted: false,
+            updated_at: 1,
+        });
+        assert!(
+            matches!(snapshot.verify(PW), Err(Error::BackupAuthentication { item_ids })
+            if item_ids == vec!["substituted-id"])
+        );
+    }
+
+    #[test]
+    fn reports_all_failed_record_ids_without_changing_the_destination() {
+        let (source, _, _) = populated();
+        let (mut destination, host, _) = populated();
+        let original_device = destination.device_id();
+        let mut snapshot = source.backup_snapshot().unwrap();
+        for id in ["failed-record-one", "failed-record-two"] {
+            let envelope = crate::crypto::seal(
+                &source.vault_key_copy().unwrap(),
+                crate::crypto::item_aad("different-id").as_bytes(),
+                br#"{"type":"future-kind"}"#,
+            )
+            .unwrap()
+            .to_json();
+            snapshot.items.push(BackupItem {
+                id: id.into(),
+                envelope: Some(envelope),
+                deleted: false,
+                updated_at: 1,
+            });
+        }
+        let result = snapshot
+            .verify(PW)
+            .and_then(|verified| destination.restore_verified_backup(verified, true));
+        assert!(
+            matches!(result, Err(Error::BackupAuthentication { item_ids })
+            if item_ids == vec!["failed-record-one", "failed-record-two"])
+        );
+        assert_eq!(destination.device_id(), original_device);
+        assert!(destination.is_unlocked());
+        assert!(destination.get(&host).is_some());
     }
 }

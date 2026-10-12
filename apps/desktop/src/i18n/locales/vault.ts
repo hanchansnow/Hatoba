@@ -15,6 +15,7 @@ export default defineMessages({
     "vault.err.tooWeak": "这个主密码容易被猜到，更长或更不常见的密码会更安全。",
 
     "vault.unlock.title": "Hatoba 已锁定",
+    "vault.unlock.progress": "正在解锁，请稍候…",
     "vault.unlock.subtitle": "输入主密码以解锁保险库",
     "vault.unlock.field": "主密码",
     "vault.unlock.submit": "解锁",
@@ -92,6 +93,7 @@ export default defineMessages({
     "vault.err.tooWeak": "This password is easy to guess. A longer or less common one is safer.",
 
     "vault.unlock.title": "Hatoba is locked",
+    "vault.unlock.progress": "Unlocking, please wait…",
     "vault.unlock.subtitle": "Enter your master password to unlock the vault",
     "vault.unlock.field": "Master password",
     "vault.unlock.submit": "Unlock",
@@ -169,6 +171,7 @@ export default defineMessages({
     "vault.err.tooWeak": "このパスワードは推測されやすいです。より長いもの、または一般的でないもののほうが安全です。",
 
     "vault.unlock.title": "Hatoba はロックされています",
+    "vault.unlock.progress": "ロックを解除しています…",
     "vault.unlock.subtitle": "マスターパスワードを入力して保管庫のロックを解除",
     "vault.unlock.field": "マスターパスワード",
     "vault.unlock.submit": "ロック解除",

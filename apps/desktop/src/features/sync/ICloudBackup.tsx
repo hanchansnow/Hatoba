@@ -1,3 +1,4 @@
+import { writeRestoreResult } from "./restoreState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "@/app/store";
 import { enterUnlocked } from "@/app/boot";
@@ -6,7 +7,7 @@ import { Button, Icon, Spinner, Switch, TextField } from "@/components/controls"
 import { Group, Row, Section } from "@/components/layout";
 import { Dialog, toast } from "@/components/overlay";
 import { useT, translate, formatBytes, formatDateTime } from "@/i18n";
-import { api, isTauri } from "@/ipc/api";
+import { api, isTauri, toAppError } from "@/ipc/api";
 import type { ICloudBackupStatus } from "@/ipc/types";
 import s from "./ICloudBackup.module.css";
 import page from "./Sync.module.css";
@@ -200,19 +201,22 @@ export function BackupRestore({ path, replace = false, onClose }: { path: string
   const restore = async () => {
     if (busy || !password || (replace && (!confirmed || !currentPassword))) return;
     setBusy(true);
+    writeRestoreResult(null);
     useApp.setState({ backupRestore: { running: true, error: null } });
     try {
       const rollback = await api.icloud_backup_restore(path, password, replace, replace ? currentPassword : null);
       setPassword(""); setCurrentPassword("");
-      if (rollback) {
-        await api.show_backup_in_finder(rollback).catch(() => {});
-      }
-      useApp.setState({ backupRestore: null });
+      const result = { running: false, error: null, completed: true, safetyBackup: rollback };
+      writeRestoreResult(result);
+      useApp.setState({ backupRestore: result });
       if (isTauri()) { window.location.reload(); return; }
-      await enterUnlocked(); useApp.setState({ settingsOpen: false });
-      toast(t("backup.restored"), "success"); onClose();
+      await enterUnlocked().catch((error) => toast(errorMessage(t, error), "error"));
+      useApp.setState({ settingsOpen: false });
+      onClose();
     } catch (e) {
-      useApp.setState({ backupRestore: { running: false, error: errorMessage(t, e) } });
+      const result = { running: false, error: errorMessage(t, e), safetyBackup: toAppError(e).safety_backup ?? null, failedItems: toAppError(e).backup_item_ids ?? [] };
+      writeRestoreResult(result);
+      useApp.setState({ backupRestore: result });
       setBusy(false);
     } finally { setPassword(""); setCurrentPassword(""); }
   };

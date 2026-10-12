@@ -23,6 +23,10 @@ pub enum ErrorCode {
     SyncOffline,
     RemoteInitialized,
     RemoteNotInitialized,
+    /// Another sync setup (flow A or C, §6.6) is still running.
+    SyncSetupBusy,
+    /// Sync is already set up on this device, so it cannot join a cloud vault (flow C).
+    SyncAlreadyConfigured,
     /// In-app deployment (§6.7): Cloudflare rejected the API token.
     CloudflareToken,
     /// The API token lacks the permission in `permission`.
@@ -105,6 +109,10 @@ pub struct AppError {
     pub cf_code: Option<u32>,
     /// `ai`: the HTTP status the provider answered with.
     pub http_status: Option<u16>,
+    /// A completed encrypted safety copy to reveal after a failed restore.
+    pub safety_backup: Option<Box<str>>,
+    /// IDs of records that prevented the entire backup from being restored.
+    pub backup_item_ids: Option<Box<[String]>>,
 }
 
 pub type AppResult<T> = Result<T, AppError>;
@@ -121,7 +129,14 @@ impl AppError {
             permission: None,
             cf_code: None,
             http_status: None,
+            safety_backup: None,
+            backup_item_ids: None,
         }
+    }
+
+    pub fn with_safety_backup(mut self, path: Option<String>) -> Self {
+        self.safety_backup = path.map(String::into_boxed_str);
+        self
     }
 
     pub fn locked() -> Self {
@@ -179,6 +194,13 @@ impl From<hatoba_core::Error> for AppError {
         use hatoba_core::Error as E;
         let detail = e.to_string();
         match e {
+            E::BackupAuthentication { item_ids } => Self {
+                backup_item_ids: Some(item_ids.into_boxed_slice()),
+                ..Self::invalid(
+                    "backup",
+                    "Backup item authentication failed; nothing restored",
+                )
+            },
             E::Locked => Self::locked(),
             E::VaultNotInitialized => Self::new(ErrorCode::NotInitialized, detail),
             E::VaultAlreadyInitialized => Self::new(ErrorCode::AlreadyInitialized, detail),
@@ -198,6 +220,7 @@ impl From<hatoba_core::Error> for AppError {
             }
             E::RemoteNotInitialized => Self::new(ErrorCode::RemoteNotInitialized, detail),
             E::RemoteInitialized => Self::new(ErrorCode::RemoteInitialized, detail),
+            E::SyncAlreadyConfigured => Self::new(ErrorCode::SyncAlreadyConfigured, detail),
             E::InvalidUrl(_) => Self::invalid("url", detail),
             E::CloudflareToken => Self::new(ErrorCode::CloudflareToken, detail),
             E::CloudflarePermission(p) => Self {
@@ -295,5 +318,44 @@ impl From<hatoba_ssh::KeyError> for AppError {
             K::Invalid(_) => KeyParseErrorKind::Invalid,
         };
         Self::key(kind, e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod backup_report_tests {
+    #[test]
+    fn failed_record_ids_reach_the_ipc_error_without_decrypted_contents() {
+        let mut source = hatoba_core::Vault::open_in_memory().unwrap();
+        source
+            .create_with_params("test-password", hatoba_core::KdfParams::for_tests())
+            .unwrap();
+        let mut file = source.backup_snapshot().unwrap();
+        for id in ["first-record", "second-record"] {
+            let envelope = hatoba_core::crypto::seal(
+                &source.vault_key_copy().unwrap(),
+                hatoba_core::crypto::item_aad("wrong-id").as_bytes(),
+                br#"{"type":"host","name":"private-host-name"}"#,
+            )
+            .unwrap()
+            .to_json();
+            file.items.push(hatoba_core::backup::BackupItem {
+                id: id.into(),
+                envelope: Some(envelope),
+                deleted: false,
+                updated_at: 1,
+            });
+        }
+        let error = match file.verify("test-password") {
+            Err(error) => super::AppError::from(error),
+            Ok(_) => panic!("tampered records must not verify"),
+        };
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            wire["backup_item_ids"],
+            serde_json::json!(["first-record", "second-record"])
+        );
+        assert_eq!(wire["code"], "invalid_input");
+        assert!(!wire.to_string().contains("private-host-name"));
+        assert!(!wire.to_string().contains("test-password"));
     }
 }

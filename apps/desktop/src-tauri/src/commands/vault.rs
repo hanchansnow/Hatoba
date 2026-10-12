@@ -112,9 +112,9 @@ pub async fn vault_unlock(
     state: State<'_, AppState>,
     password: String,
 ) -> AppResult<()> {
-    let _operation = state.lifecycle_operation()?;
-    let generation = state.vault().lock_generation();
     let password = Zeroizing::new(password);
+    let _operation = state.unlock_operation().await?;
+    let generation = state.vault().lock_generation();
     let vault = state.vault.clone();
     blocking(move || {
         let mut vault = vault
@@ -133,7 +133,7 @@ pub async fn vault_unlock(
 #[tauri::command]
 #[specta::specta]
 pub async fn vault_unlock_biometric(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    let _operation = state.lifecycle_operation()?;
+    let _operation = state.unlock_operation().await?;
     let generation = state.vault().lock_generation();
     let key = biometric::unlock(&app, state.secrets.as_ref()).await?;
     state.with_lock_generation(generation, |vault| Ok(vault.unlock_with_vault_key(key)?))?;

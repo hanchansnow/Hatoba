@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use hatoba_core::vault::Vault;
@@ -26,6 +27,7 @@ pub struct AppState {
     /// Serializes key and connection changes with restore, including awaited work.
     /// Lock requests bypass this gate so prompts and network work cannot delay locking.
     pub lifecycle: tokio::sync::Mutex<()>,
+    lock_cleanup: AtomicBool,
     pub secrets: Arc<KeyringStore>,
     pub ssh: SshManager,
     pub sync: SyncController,
@@ -51,6 +53,7 @@ impl AppState {
             vault: Arc::new(Mutex::new(vault)),
             backups: crate::backup::Backups::default(),
             lifecycle: tokio::sync::Mutex::new(()),
+            lock_cleanup: AtomicBool::new(false),
             secrets: Arc::new(KeyringStore),
             ssh: SshManager::default(),
             sync: SyncController::default(),
@@ -70,6 +73,28 @@ impl AppState {
         self.lifecycle
             .try_lock()
             .map_err(|_| AppError::invalid("vault", "A vault operation is already in progress"))
+    }
+
+    /// Cleanup still excludes new sessions and MCP servers, but unlock can visibly wait for it.
+    pub(crate) fn lock_cleanup_operation(&self) -> Option<LockCleanup<'_>> {
+        let guard = self.lifecycle.try_lock().ok()?;
+        self.lock_cleanup.store(true, Ordering::Release);
+        Some(LockCleanup {
+            _guard: guard,
+            cleanup: &self.lock_cleanup,
+        })
+    }
+
+    /// Queue only behind lock cleanup, never behind a restore or other key replacement.
+    pub async fn unlock_operation(&self) -> AppResult<tokio::sync::MutexGuard<'_, ()>> {
+        let generation = self.vault().lock_generation();
+        let guard = match self.lifecycle.try_lock() {
+            Ok(guard) => guard,
+            Err(_) if self.lock_cleanup.load(Ordering::Acquire) => self.lifecycle.lock().await,
+            Err(_) => return self.lifecycle_operation(),
+        };
+        self.vault().ensure_lock_generation(generation)?;
+        Ok(guard)
     }
 
     /// Locks the vault mutex. Poisoning only happens after a panic while holding it; the vault's
@@ -107,6 +132,17 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .elapsed()
+    }
+}
+
+/// Marks the lifecycle guard held only for post-lock session cleanup.
+pub(crate) struct LockCleanup<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    cleanup: &'a AtomicBool,
+}
+impl Drop for LockCleanup<'_> {
+    fn drop(&mut self) {
+        self.cleanup.store(false, Ordering::Release);
     }
 }
 
@@ -183,5 +219,46 @@ mod lifecycle_tests {
         let _guard = state.lifecycle_operation().unwrap();
         state.vault().unlock("original-vault-password").unwrap();
         assert!(state.vault().is_unlocked());
+    }
+
+    #[tokio::test]
+    async fn an_unlock_waits_for_delayed_cleanup_without_becoming_a_credential_error() {
+        let state = AppState::new(Vault::open_in_memory().unwrap(), false);
+        state
+            .vault()
+            .create_with_params("test-password", hatoba_core::KdfParams::for_tests())
+            .unwrap();
+        let cleanup = state.lock_cleanup_operation().unwrap();
+        crate::lock::lock_now(&state);
+        let mut request = Box::pin(state.unlock_operation());
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        assert!(!state.vault().is_unlocked());
+        drop(cleanup); // Represents awaited MCP/session shutdown finishing.
+        let _operation = request.await.unwrap();
+        state.vault().unlock("test-password").unwrap();
+        assert!(state.vault().is_unlocked());
+    }
+
+    #[tokio::test]
+    async fn a_new_lock_invalidates_an_unlock_waiting_for_cleanup() {
+        let state = AppState::new(Vault::open_in_memory().unwrap(), false);
+        let cleanup = state.lock_cleanup_operation().unwrap();
+        crate::lock::lock_now(&state);
+        let mut request = Box::pin(state.unlock_operation());
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        crate::lock::lock_now(&state); // Sleep/manual lock while the request is queued.
+        drop(cleanup);
+        assert_eq!(
+            request.await.unwrap_err().code,
+            crate::error::ErrorCode::Locked
+        );
+        assert!(!state.vault().is_unlocked());
+    }
+
+    #[tokio::test]
+    async fn unlock_does_not_queue_an_old_password_behind_restore() {
+        let state = AppState::new(Vault::open_in_memory().unwrap(), false);
+        let _restore = state.lifecycle_operation().unwrap();
+        assert!(state.unlock_operation().await.is_err());
     }
 }

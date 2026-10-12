@@ -1,6 +1,9 @@
 import { defineMessages } from "./define";
 export default defineMessages({
   "zh-CN": {
+    "backup.authenticationFailed": "以下记录未通过认证，整份备份没有恢复，当前保险库未被替换。", "backup.failedRecords": "未通过认证的记录 ID：",
+    "backup.showSafety": "在 Finder 中显示安全备份", "backup.safetySaved": "当前保险库的加密安全备份已保存在：",
+    "backup.restoredHint": "保险库已恢复。如需解锁，请使用创建这份备份时的主密码。",
     "backup.restoring": "正在验证并恢复加密备份…",
     "backup.footer.synced_sub": "{time} · iCloud",
     "backup.retention": "保留最近快照数量", "backup.retentionInvalid": "请输入至少为 1 的整数。",
@@ -26,6 +29,9 @@ export default defineMessages({
     "backup.note": "每个文件都是独立历史快照。macOS 上传完成后，其他设备可从 iCloud Drive 获取它。",
   },
   en: {
+    "backup.authenticationFailed": "These records could not be authenticated. Nothing was restored and the current vault was not replaced.", "backup.failedRecords": "Record IDs that could not be authenticated:",
+    "backup.showSafety": "Show Safety Backup in Finder", "backup.safetySaved": "An encrypted safety copy of the previous vault was saved at:",
+    "backup.restoredHint": "Vault restored. To unlock, use the master password from when this backup was created.",
     "backup.restoring": "Verifying and restoring the encrypted backup…",
     "backup.footer.synced_sub": "{time} · iCloud",
     "backup.retention": "Snapshots to keep", "backup.retentionInvalid": "Enter a whole number of at least 1.",
@@ -51,6 +57,9 @@ export default defineMessages({
     "backup.note": "Each file is a separate historical snapshot. After macOS finishes uploading it, other devices can retrieve it from iCloud Drive.",
   },
   ja: {
+    "backup.authenticationFailed": "次のレコードを認証できませんでした。復元は実行されず、現在の保管庫は変更されていません。", "backup.failedRecords": "認証できなかったレコード ID：",
+    "backup.showSafety": "安全バックアップを Finder で表示", "backup.safetySaved": "以前の保管庫の暗号化された安全コピーを保存しました：",
+    "backup.restoredHint": "保管庫を復元しました。解除には、このバックアップの作成時のマスターパスワードを使用してください。",
     "backup.restoring": "暗号化バックアップを検証して復元しています…",
     "backup.footer.synced_sub": "{time} · iCloud",
     "backup.retention": "保持するスナップショット数", "backup.retentionInvalid": "1 以上の整数を入力してください。",

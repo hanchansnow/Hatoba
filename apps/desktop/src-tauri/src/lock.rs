@@ -73,7 +73,7 @@ fn locks_on_sleep(state: &AppState) -> bool {
 pub async fn lock_vault(app: &AppHandle, reason: LockReason) {
     let state = state(app);
     // Serialize cleanup with new unlocks when idle, but never wait for an existing task.
-    let _operation = state.lifecycle.try_lock().ok();
+    let _operation = state.lock_cleanup_operation();
     let was_unlocked = lock_now(&state);
     finish_lock(app, reason, was_unlocked).await;
 }

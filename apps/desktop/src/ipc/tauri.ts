@@ -110,6 +110,7 @@ export function createTauriApi(): HatobaApi {
     sync_status: () => call("sync_status"),
     sync_test: (config) => call("sync_test", { config }),
     sync_configure: (config, password) => call("sync_configure", { config, password }),
+    sync_join: (config, password) => call("sync_join", { config, password }),
     sync_now: () => call("sync_now"),
     sync_login: (password) => call("sync_login", { password }),
     sync_set_auto: (enabled) => call("sync_set_auto", { enabled }),
@@ -132,6 +133,7 @@ export function createTauriApi(): HatobaApi {
     deploy_cleanup: (handle) => call("deploy_cleanup", { handle }),
     deploy_cancel: (handle) => call("deploy_cancel", { handle }),
     deploy_setup: (handle, password) => call("deploy_setup", { handle, password }),
+    deploy_join: (handle, target, password) => call("deploy_join", { handle, target, password }),
     deploy_upgrade_defaults: () => call("deploy_upgrade_defaults"),
     deploy_upgrade_inspect: (handle, target) => call("deploy_upgrade_inspect", { handle, target }),
     deploy_upgrade: (handle, target, onProgress) => {
@@ -141,7 +143,7 @@ export function createTauriApi(): HatobaApi {
     },
 
     settings_get: () => call("settings_get"),
-    settings_save: (settings) => call("settings_save", { settings }),
+    settings_save: (patch) => call("settings_save", { patch }),
     prefs_get: () => call("prefs_get"),
     prefs_save: (prefs) => call("prefs_save", { prefs }),
     star_prompt_get: () => call("star_prompt_get"),
@@ -157,7 +159,7 @@ export function createTauriApi(): HatobaApi {
     search_provider_delete: (id) => call("search_provider_delete", { id }),
     search_provider_test: (input) => call("search_provider_test", { input }),
     ai_settings_get: () => call("ai_settings_get"),
-    ai_settings_save: (settings) => call("ai_settings_save", { settings }),
+    ai_settings_save: (patch) => call("ai_settings_save", { patch }),
     ai_conversations_list: () => call("ai_conversations_list"),
     ai_conversation_get: (id) => call("ai_conversation_get", { id }),
     ai_conversation_rename: (id, title) => call("ai_conversation_rename", { id, title }),

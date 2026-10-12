@@ -117,8 +117,10 @@ impl Default for Config {
 }
 
 fn config(state: &AppState) -> AppResult<Config> {
-    let value = state
-        .vault()
+    vault_config(&state.vault())
+}
+fn vault_config(vault: &hatoba_core::Vault) -> AppResult<Config> {
+    let value = vault
         .local_prefs()?
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
@@ -149,7 +151,9 @@ fn parse_config(mut value: serde_json::Value) -> AppResult<Config> {
     Ok(cfg)
 }
 fn save_config(state: &AppState, cfg: &Config) -> AppResult<()> {
-    let mut vault = state.vault();
+    save_vault_config(&mut state.vault(), cfg)
+}
+fn save_vault_config(vault: &mut hatoba_core::Vault, cfg: &Config) -> AppResult<()> {
     let mut value = vault
         .local_prefs()?
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -759,13 +763,65 @@ fn has_last_snapshot(directory: &Path, device: &str, cfg: &Config) -> AppResult<
     })
 }
 
-pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
-    let state = app.state::<AppState>();
+struct Publication {
+    file: BackupFile,
+    device: String,
+    device_name: String,
+    cfg: Config,
+}
+
+/// The lifecycle gate covers only the consistent encrypted capture, never file publication.
+fn prepare_publication(state: &AppState, automatic: bool) -> AppResult<Option<Publication>> {
+    let cfg = config(state)?;
+    if automatic && !(cfg.enabled && cfg.automatic) {
+        return Ok(None);
+    }
+    if !cfg.enabled {
+        return Err(AppError::invalid("backup", "Enable iCloud Backup first"));
+    }
     let _operation = match state.lifecycle_operation() {
         Ok(guard) => guard,
-        Err(_) if automatic => return Ok(()),
+        Err(_) if automatic => return Ok(None),
         Err(error) => return Err(error),
     };
+    let vault = state.vault();
+    if !vault.is_unlocked() {
+        return if automatic {
+            Ok(None)
+        } else {
+            Err(AppError::locked())
+        };
+    }
+    Ok(Some(Publication {
+        file: vault.backup_snapshot()?,
+        device: vault.device_id(),
+        device_name: sealed_device_name(&vault, &vault.device_id())?,
+        cfg,
+    }))
+}
+
+/// A different vault can be installed while immutable ciphertext is being published.
+fn record_publication(
+    state: &AppState,
+    device: &str,
+    digest: String,
+    at: i64,
+    name: String,
+) -> AppResult<bool> {
+    let mut vault = state.vault();
+    if vault.device_id() != device {
+        return Ok(false);
+    }
+    let mut cfg = vault_config(&vault)?;
+    cfg.last_at = Some(at);
+    cfg.last_digest = Some(digest);
+    cfg.last_name = Some(name);
+    save_vault_config(&mut vault, &cfg)?;
+    Ok(true)
+}
+
+pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
+    let state = app.state::<AppState>();
     let _gate = if automatic {
         match state.backups.gate.try_lock() {
             Ok(guard) => guard,
@@ -774,28 +830,16 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
     } else {
         state.backups.gate.lock().await
     };
-    let cfg = config(&state)?;
-    if automatic && !(cfg.enabled && cfg.automatic) {
+    let Some(Publication {
+        mut file,
+        device,
+        device_name,
+        cfg,
+    }) = prepare_publication(&state, automatic)?
+    else {
         return Ok(());
-    }
-    if !cfg.enabled {
-        return Err(AppError::invalid("backup", "Enable iCloud Backup first"));
-    }
-    let (mut file, device, device_name) = {
-        let vault = state.vault();
-        if !vault.is_unlocked() {
-            return if automatic {
-                Ok(())
-            } else {
-                Err(AppError::locked())
-            };
-        }
-        (
-            vault.backup_snapshot()?,
-            vault.device_id(),
-            sealed_device_name(&vault, &vault.device_id())?,
-        )
     };
+    let owner = device.clone();
     let work_app = app.clone();
     let outcome = blocking(move || {
         let digest = fingerprint(&mut file)?;
@@ -826,11 +870,9 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
     .await;
     match outcome {
         Ok(Some((digest, at, name, target))) => {
-            let mut cfg = config(&state)?;
-            cfg.last_at = Some(at);
-            cfg.last_digest = Some(digest);
-            cfg.last_name = Some(name);
-            save_config(&state, &cfg)?;
+            if !record_publication(&state, &owner, digest, at, name)? {
+                return Ok(());
+            }
             *state
                 .backups
                 .error
@@ -853,6 +895,9 @@ pub async fn run(app: AppHandle, automatic: bool) -> AppResult<()> {
         }
         Ok(None) => Ok(()),
         Err(error) => {
+            if state.vault().device_id() != owner {
+                return Ok(());
+            }
             *state
                 .backups
                 .error
@@ -1197,5 +1242,78 @@ mod tests {
         cache.insert(root.0.join(&name), file);
         let entries = read_entries(&root.0, &device, &mut cache, &mut present, false).unwrap();
         assert_eq!(entries[0].name, name);
+    }
+
+    #[tokio::test]
+    async fn delayed_publication_allows_foreground_changes_and_keeps_a_consistent_snapshot() {
+        let mut vault = hatoba_core::Vault::open_in_memory().unwrap();
+        vault
+            .create_with_params("old-vault-password", hatoba_core::KdfParams::for_tests())
+            .unwrap();
+        let state = AppState::new(vault, false);
+        save_config(
+            &state,
+            &Config {
+                enabled: true,
+                automatic: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let gate = state.backups.gate.lock().await;
+        let publication = prepare_publication(&state, true).unwrap().unwrap();
+        // Publication is paused after capture, with the backup gate held as in run().
+        let foreground = state.lifecycle_operation().unwrap();
+        state
+            .vault()
+            .change_password("old-vault-password", "new-vault-password")
+            .unwrap();
+        drop(foreground);
+        assert!(state.backups.gate.try_lock().is_err());
+        crate::lock::lock_now(&state);
+        let directory = Directory::new();
+        let path = directory.0.join("snapshot.hatoba");
+        write_backup(&publication.file, &path).unwrap();
+        read_backup(&path)
+            .unwrap()
+            .verify("old-vault-password")
+            .unwrap();
+        assert!(!state.vault().is_unlocked());
+        drop(gate);
+        state.vault().unlock("new-vault-password").unwrap();
+    }
+
+    #[test]
+    fn a_publication_from_a_replaced_installation_cannot_change_its_backup_metadata() {
+        let mut vault = hatoba_core::Vault::open_in_memory().unwrap();
+        vault
+            .create_with_params("password", hatoba_core::KdfParams::for_tests())
+            .unwrap();
+        let state = AppState::new(vault, false);
+        save_config(
+            &state,
+            &Config {
+                enabled: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let publication = prepare_publication(&state, false).unwrap().unwrap();
+        let verified = publication.file.verify("password").unwrap();
+        state
+            .vault()
+            .restore_verified_backup(verified, true)
+            .unwrap();
+        assert!(
+            !record_publication(
+                &state,
+                &publication.device,
+                "old-digest".into(),
+                42,
+                "old-snapshot.hatoba".into()
+            )
+            .unwrap()
+        );
+        assert!(config(&state).unwrap().last_at.is_none());
     }
 }
