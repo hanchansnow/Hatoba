@@ -26,7 +26,8 @@ pub struct AppState {
     pub backups: crate::backup::Backups,
     /// Serializes key and connection changes with restore, including awaited work.
     /// Lock requests bypass this gate so prompts and network work cannot delay locking.
-    pub lifecycle: tokio::sync::Mutex<()>,
+    lifecycle: tokio::sync::Mutex<()>,
+    lifecycle_busy: AtomicBool,
     lock_cleanup: AtomicBool,
     pub secrets: Arc<KeyringStore>,
     pub ssh: SshManager,
@@ -53,6 +54,7 @@ impl AppState {
             vault: Arc::new(Mutex::new(vault)),
             backups: crate::backup::Backups::default(),
             lifecycle: tokio::sync::Mutex::new(()),
+            lifecycle_busy: AtomicBool::new(false),
             lock_cleanup: AtomicBool::new(false),
             secrets: Arc::new(KeyringStore),
             ssh: SshManager::default(),
@@ -69,15 +71,32 @@ impl AppState {
     }
 
     /// Rejects concurrent lifecycle requests rather than queueing an old password/key request.
-    pub fn lifecycle_operation(&self) -> AppResult<tokio::sync::MutexGuard<'_, ()>> {
+    pub fn lifecycle_operation(&self) -> AppResult<LifecycleOperation<'_>> {
         self.lifecycle
             .try_lock()
+            .map(|guard| self.track_lifecycle(guard))
             .map_err(|_| AppError::invalid("vault", "A vault operation is already in progress"))
+    }
+
+    /// Observation never claims the mutex or competes with a foreground request.
+    pub(crate) fn lifecycle_busy(&self) -> bool {
+        self.lifecycle_busy.load(Ordering::Acquire)
+    }
+
+    fn track_lifecycle<'a>(
+        &'a self,
+        guard: tokio::sync::MutexGuard<'a, ()>,
+    ) -> LifecycleOperation<'a> {
+        self.lifecycle_busy.store(true, Ordering::Release);
+        LifecycleOperation {
+            _guard: guard,
+            busy: &self.lifecycle_busy,
+        }
     }
 
     /// Cleanup still excludes new sessions and MCP servers, but unlock can visibly wait for it.
     pub(crate) fn lock_cleanup_operation(&self) -> Option<LockCleanup<'_>> {
-        let guard = self.lifecycle.try_lock().ok()?;
+        let guard = self.lifecycle_operation().ok()?;
         self.lock_cleanup.store(true, Ordering::Release);
         Some(LockCleanup {
             _guard: guard,
@@ -86,15 +105,16 @@ impl AppState {
     }
 
     /// Queue only behind lock cleanup, never behind a restore or other key replacement.
-    pub async fn unlock_operation(&self) -> AppResult<tokio::sync::MutexGuard<'_, ()>> {
+    pub async fn unlock_operation(&self) -> AppResult<LifecycleOperation<'_>> {
         let generation = self.vault().lock_generation();
         let guard = match self.lifecycle.try_lock() {
             Ok(guard) => guard,
             Err(_) if self.lock_cleanup.load(Ordering::Acquire) => self.lifecycle.lock().await,
             Err(_) => return self.lifecycle_operation(),
         };
+        let operation = self.track_lifecycle(guard);
         self.vault().ensure_lock_generation(generation)?;
-        Ok(guard)
+        Ok(operation)
     }
 
     /// Locks the vault mutex. Poisoning only happens after a panic while holding it; the vault's
@@ -135,9 +155,23 @@ impl AppState {
     }
 }
 
+/// Every lifecycle entry point owns the busy marker until its operation ends.
+#[derive(Debug)]
+#[must_use = "Hold this guard for the complete lifecycle operation"]
+pub struct LifecycleOperation<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    busy: &'a AtomicBool,
+}
+impl Drop for LifecycleOperation<'_> {
+    fn drop(&mut self) {
+        // Clear before releasing the mutex, so a new owner's marker cannot be overwritten.
+        self.busy.store(false, Ordering::Release);
+    }
+}
+
 /// Marks the lifecycle guard held only for post-lock session cleanup.
 pub(crate) struct LockCleanup<'a> {
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+    _guard: LifecycleOperation<'a>,
     cleanup: &'a AtomicBool,
 }
 impl Drop for LockCleanup<'_> {
@@ -229,14 +263,19 @@ mod lifecycle_tests {
             .create_with_params("test-password", hatoba_core::KdfParams::for_tests())
             .unwrap();
         let cleanup = state.lock_cleanup_operation().unwrap();
+        assert!(state.lifecycle_busy());
         crate::lock::lock_now(&state);
         let mut request = Box::pin(state.unlock_operation());
         assert!(futures::poll!(request.as_mut()).is_pending());
         assert!(!state.vault().is_unlocked());
         drop(cleanup); // Represents awaited MCP/session shutdown finishing.
-        let _operation = request.await.unwrap();
+        assert!(!state.lifecycle_busy());
+        let operation = request.await.unwrap();
+        assert!(state.lifecycle_busy());
         state.vault().unlock("test-password").unwrap();
         assert!(state.vault().is_unlocked());
+        drop(operation);
+        assert!(!state.lifecycle_busy());
     }
 
     #[tokio::test]
@@ -253,6 +292,7 @@ mod lifecycle_tests {
             crate::error::ErrorCode::Locked
         );
         assert!(!state.vault().is_unlocked());
+        assert!(!state.lifecycle_busy());
     }
 
     #[tokio::test]
@@ -260,5 +300,49 @@ mod lifecycle_tests {
         let state = AppState::new(Vault::open_in_memory().unwrap(), false);
         let _restore = state.lifecycle_operation().unwrap();
         assert!(state.unlock_operation().await.is_err());
+    }
+
+    #[test]
+    fn busy_marker_follows_the_owner_and_failed_requests_cannot_clear_it() {
+        let state = AppState::new(Vault::open_in_memory().unwrap(), false);
+        assert!(!state.lifecycle_busy());
+        let operation = state.lifecycle_operation().unwrap();
+        assert!(state.lifecycle_busy());
+        assert!(state.lifecycle_operation().is_err());
+        assert!(state.lock_cleanup_operation().is_none());
+        assert!(state.lifecycle_busy());
+        drop(operation);
+        assert!(!state.lifecycle_busy());
+        let cleanup = state.lock_cleanup_operation().unwrap();
+        assert!(state.lifecycle_busy());
+        drop(cleanup);
+        assert!(!state.lifecycle_busy());
+    }
+
+    #[tokio::test]
+    async fn observing_busy_does_not_probe_a_mutex_reserved_for_a_waiter() {
+        let state = AppState::new(Vault::open_in_memory().unwrap(), false);
+        let raw = state.lifecycle.try_lock().unwrap();
+        let mut waiter = Box::pin(state.lifecycle.lock());
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        drop(raw); // Tokio reserves the permit for the queued request, not an active operation.
+        assert!(state.lifecycle.try_lock().is_err());
+        assert!(!state.lifecycle_busy());
+        let operation = state.track_lifecycle(waiter.await);
+        assert!(state.lifecycle_busy());
+        drop(operation);
+        assert!(!state.lifecycle_busy());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_unlock_preserves_the_cleanup_owners_busy_marker() {
+        let state = AppState::new(Vault::open_in_memory().unwrap(), false);
+        let cleanup = state.lock_cleanup_operation().unwrap();
+        let mut request = Box::pin(state.unlock_operation());
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        drop(request);
+        assert!(state.lifecycle_busy());
+        drop(cleanup);
+        assert!(!state.lifecycle_busy());
     }
 }

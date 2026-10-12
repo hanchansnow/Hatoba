@@ -51,7 +51,7 @@ fn idle_lock_due(state: &AppState, idle: Duration) -> bool {
     let minutes = state.lock_policy.auto_lock_minutes.load(Ordering::Relaxed);
     minutes != 0
         && idle >= Duration::from_secs(u64::from(minutes) * 60)
-        && (state.vault().is_unlocked() || state.lifecycle.try_lock().is_err())
+        && (state.vault().is_unlocked() || state.lifecycle_busy())
 }
 
 fn disconnects_on_lock(state: &AppState) -> bool {
@@ -192,7 +192,7 @@ mod tests {
                 .unwrap()
         );
         assert!(!state.vault().is_unlocked());
-        assert!(state.lifecycle.try_lock().is_err()); // The prompt/restore gate has not ended.
+        assert!(state.lifecycle_busy()); // The prompt/restore gate has not ended.
         resume.notify_one();
         assert!(pending.await.unwrap().is_err());
         assert!(!state.vault().is_unlocked());
@@ -236,6 +236,33 @@ mod tests {
         drop(vault);
         worker.join().unwrap();
         assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn concurrent_idle_checks_never_claim_a_lifecycle_operation() {
+        let state = std::sync::Arc::new(unlocked());
+        state
+            .vault()
+            .set_local_prefs(r#"{"auto_lock_minutes":1}"#)
+            .unwrap();
+        refresh_policy(&state);
+        super::lock_now(&state);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let watcher_state = state.clone();
+        let watcher_start = start.clone();
+        let watcher = std::thread::spawn(move || {
+            watcher_start.wait();
+            for _ in 0..50_000 {
+                std::hint::black_box(idle_lock_due(&watcher_state, IDLE));
+            }
+        });
+        start.wait();
+        for _ in 0..50_000 {
+            let _operation = state.lifecycle_operation().unwrap();
+        }
+        watcher.join().unwrap();
+        assert!(!state.lifecycle_busy());
+        assert!(!idle_lock_due(&state, IDLE));
     }
 
     #[test]
