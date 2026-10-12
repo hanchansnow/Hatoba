@@ -3,6 +3,73 @@
   padding: 0 10px 10px;
 }
 
+/* §13.1: the queued message, above the input box. */
+.queued {
+  margin-bottom: 6px;
+  border-radius: var(--radius-panel);
+  background: var(--field);
+  box-shadow: 0 0 0 0.5px var(--fieldline), 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.queuedHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 0 10px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+
+.queuedIcon {
+  flex: none;
+}
+
+.queuedTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queuedEdit {
+  flex: none;
+  font-size: var(--text-xs);
+}
+
+.queuedRemove {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg3);
+}
+
+.queuedRemove:hover {
+  background: var(--fill);
+  color: var(--fg);
+}
+
+/* A long message shows its first lines; Edit shows all of it. */
+.queuedText {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  padding: 4px 12px 8px;
+  color: var(--fg2);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .box {
   display: flex;
   flex-direction: column;
@@ -28,6 +95,7 @@
   font-size: var(--text-md);
   line-height: 1.5;
   overflow-y: auto;
+  text-overflow: ellipsis;
 }
 
 /* The box shows focus with its ring; the global :focus-visible outline would draw a second, square one. */
@@ -35,8 +103,14 @@
   outline: none;
 }
 
+/* One line, cut with an ellipsis in a narrow panel: the box grows with the typed text, so a
+ * second line would be clipped. Chromium draws the ellipsis only with `text-overflow` on the box
+ * as well; typed text wraps, so it never shows there. */
 .input::placeholder {
   color: var(--fg3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .bar {

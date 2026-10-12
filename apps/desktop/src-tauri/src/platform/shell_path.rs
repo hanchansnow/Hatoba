@@ -253,7 +253,9 @@ mod tests {
                 "child",
                 &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
             );
-            let path = run_login_shell(&shell, "__m__", Duration::from_millis(300));
+            // Give the fixture time to start its background child before the deadline.
+            // The shorter timeout tests above cover how promptly the shell is stopped.
+            let path = run_login_shell(&shell, "__m__", Duration::from_secs(5));
             std::fs::remove_file(&shell).unwrap();
             assert_eq!(path, None);
             let pid = std::fs::read_to_string(&pid_file).unwrap();
@@ -271,7 +273,8 @@ mod tests {
             }
             assert!(
                 !alive(),
-                "the shell's background sleep outlived the timeout"
+                "the shell's background sleep ({}) outlived the timeout",
+                pid.trim()
             );
         }
 

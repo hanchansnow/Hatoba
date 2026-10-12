@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { useApp } from "@/app/store";
 import type { AiConversationView, AiEntryView, AiFileChange, AiModelRef, AiPermissionMode, AiProviderView, AiSettingsView } from "@/ipc/types";
-import type { DiagnosticsAttachment, FileAttachment, PasteAttachment, SelectionState } from "./attachments";
+import type { Attachment, DiagnosticsAttachment, SelectionAttachment, SelectionState } from "./attachments";
 import type { EffortPick } from "./effort";
 import type { SideQuestion } from "./side";
 import type { TurnOutcome, TurnState } from "./turn";
@@ -39,8 +39,13 @@ export interface Slot {
   remoteRunning: boolean;
   /** Unsent text in the input box. */
   draft: string;
-  /** AI-35: long pastes and text files that go with the next message, in the order they were added. */
+  /**
+   * AI-35: long pastes and text files that go with the next message, in the order they were added, and a
+   * selection or diagnostics a message that was not sent gave back (§13.1).
+   */
   extras: PendingAttachment[];
+  /** §13.1: what Enter sent while a turn ran, to go when the turn ends. Kept only in memory. */
+  queued: QueuedMessage | null;
   /** AI-30: MCP servers switched off for this conversation in the tools menu. */
   mcpOff: string[];
   /** AI-46: whether messages show the terminal's screen, set in the + menu; null follows Settings → AI. */
@@ -51,10 +56,27 @@ export interface Slot {
   side: SideQuestion | null;
 }
 
-/** A paste or file waiting in the input area; `id` tells their chips apart. */
+/** A paste or file waiting in the input area, or a chip a message gave back (§13.1); `id` tells their chips apart. */
 export interface PendingAttachment {
   id: string;
-  attachment: PasteAttachment | FileAttachment;
+  attachment: Attachment;
+}
+
+/** The tab's diagnostics or selection: a message takes at most one of each (AI-10). */
+export type InputChip = DiagnosticsAttachment | SelectionAttachment;
+
+/**
+ * A message that waits for the running turn to end (§13.1): what was typed and what it took from the
+ * input area, at most one set of diagnostics and one selection (`chips`, AI-10), then the pastes and
+ * files. Once it goes back into the input area, `restore` puts back in their places the chips it took that
+ * are still in `kept` (one removed from the queued message stays removed), and returns those whose place
+ * another chip of their kind took meanwhile.
+ */
+export interface QueuedMessage {
+  typed: string;
+  chips: InputChip[];
+  extras: PendingAttachment[];
+  restore: (kept: readonly Attachment[]) => InputChip[];
 }
 
 /** A tab's selection; `hidden` is the `seq` whose chip was removed or sent (it shows again once the selection changes). */
@@ -137,6 +159,7 @@ export function blankSlot(mode: AiPermissionMode = defaultMode(), draft = "", ex
     remoteRunning: false,
     draft,
     extras,
+    queued: null,
     mcpOff: [],
     screen: null,
     reveal: null,
