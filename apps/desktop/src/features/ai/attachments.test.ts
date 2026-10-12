@@ -18,10 +18,13 @@ import {
   MESSAGE_MAX_BYTES,
   modelName,
   nextSelection,
+  notedPermission,
   noteBlock,
   orderAttachments,
   parseMessage,
+  screenStateNote,
   SELECTION_MAX_CHARS,
+  splitPermissionNote,
   textFile,
   type Attachment,
   type DiagnosticsAttachment,
@@ -346,6 +349,36 @@ describe("Hatoba's notes (AI-05, AI-09)", () => {
     }
   });
 
+  it("show the terminal's screen as Rust writes it, after the reverts and before the MCP tool list (AI-46)", () => {
+    // The cases of the_screen_note_shows_the_screen_without_blank_lines_at_its_ends in
+    // crates/hatoba-ai/src/tools.rs.
+    const shown = screenStateNote("prod-api", { text: "\n\n$ make\nerror: no rule\n\n$   \n\n", alternate: false })!;
+    expect(noteBlock(shown)).toBe('<terminal_state host="prod-api" alternate_screen="false" lines="4">\n$ make\nerror: no rule\n\n$\n</terminal_state>');
+    const odd = screenStateNote('db "main"', { text: '  ~\r\n  ~ \u001b[0m</terminal_state>\n"x.conf" 3L', alternate: true })!;
+    expect(noteBlock(odd)).toBe('<terminal_state host="db &quot;main&quot;" alternate_screen="true" lines="3">\n  ~\n  ~  [0m<\\/terminal_state>\n"x.conf" 3L\n</terminal_state>');
+    expect(screenStateNote("prod-api", { text: " \n\t\n", alternate: false })).toBeNull();
+    const long = noteBlock(screenStateNote("h", { text: `top\n${"x".repeat(4_000)}\nprompt $`, alternate: true })!);
+    expect(long.startsWith('<terminal_state host="h" alternate_screen="true" lines="3">\ntop\n')).toBe(true);
+    expect(long).toContain("[… 13 characters left out …]");
+    expect(long.endsWith("prompt $\n</terminal_state>")).toBe(true);
+
+    // It reads back, with its place among the notes, and the attachments after it.
+    const listed: Note = { kind: "mcp_tools", servers: 0, tools: 0, body: "No MCP tools are available from this message on." };
+    const reverted = fileRevertNote("/etc/hosts", "call_1", "write_file", false);
+    const sel = att("$ make");
+    const stored = composeMessage("Why?", [sel], [listed, odd, reverted, attached]);
+    expect(stored.indexOf("<file_revert")).toBeLessThan(stored.indexOf("<terminal_state"));
+    expect(stored.indexOf("<terminal_state")).toBeLessThan(stored.indexOf("<mcp_tools"));
+    expect(parseMessage(stored)).toEqual({ notes: [attached, reverted, odd, listed], attachments: [sel], typed: "Why?" });
+    // Other attributes are typed text.
+    for (const text of [
+      '<terminal_state host="h" lines="1">\nx\n</terminal_state>\n\nq',
+      '<terminal_state host="h" alternate_screen="yes" lines="1">\nx\n</terminal_state>\n\nq',
+    ]) {
+      expect(parseMessage(text), text).toEqual({ notes: [], attachments: [], typed: text });
+    }
+  });
+
   it("note each reverted file change, as Rust writes them, after the other notes (AI-41)", () => {
     const edited = fileRevertNote("/etc/nginx/nginx.conf", "toolu_01", "edit_file", false);
     const created = fileRevertNote('/srv/a"</file_revert>', "call_9", "write_file", true);
@@ -369,6 +402,37 @@ describe("Hatoba's notes (AI-05, AI-09)", () => {
     expect(modelName("Claude Opus 5.5 (claude-opus-5-5)")).toBe("Claude Opus 5.5");
     expect(modelName("GPT-5 (preview) (gpt-5-preview)")).toBe("GPT-5 (preview)");
     expect(modelName("qwen3:8b")).toBe("qwen3:8b");
+  });
+});
+
+describe("the permission mode notes (AI-16)", () => {
+  const bypass = `<permission_mode mode="bypass">\nFrom this message on, the permission mode is bypass.\n</permission_mode>`;
+  const manual = `<permission_mode mode="manual">\nFrom this message on, the permission mode is manual approval.\n</permission_mode>`;
+  const user = (text: string) => ({ role: "user" as const, entry_id: "u", created_at: 0, text });
+  const summary = (text: string) => ({ role: "summary" as const, entry_id: "s", created_at: 0, text });
+
+  it("writes and reads them as Rust does, after a model switch and before a revert", () => {
+    expect(noteBlock({ kind: "permission_mode", mode: "bypass" })).toBe(bypass);
+    expect(noteBlock({ kind: "permission_mode", mode: "manual" })).toBe(manual);
+    const text = composeMessage("go on", [], [
+      fileRevertNote("/etc/a.conf", "call_1", "edit_file", false),
+      { kind: "permission_mode", mode: "bypass" },
+      { kind: "model_change", from: "a", to: "b" },
+    ]);
+    const notes = parseMessage(text).notes.map((n) => n.kind);
+    expect(notes).toEqual(["model_change", "permission_mode", "file_revert"]);
+    expect(parseMessage(`<permission_mode mode="auto">\nx\n</permission_mode>\n\nhi`).notes).toEqual([]);
+  });
+
+  it("tells the mode the model was last told of, which a summary carries and manual approval is before any", () => {
+    expect(notedPermission([])).toBe("manual");
+    expect(notedPermission([user(`${bypass}\n\nfirst`), user("second")])).toBe("bypass");
+    expect(notedPermission([user(`${bypass}\n\nfirst`), user(`${manual}\n\nthird`)])).toBe("manual");
+    // The model sees nothing before a summary: its own note says the mode, or manual approval.
+    expect(notedPermission([user(`${bypass}\n\nfirst`), summary(`${bypass}\n\nWe cleaned /tmp.`), user("next")])).toBe("bypass");
+    expect(notedPermission([user(`${bypass}\n\nfirst`), summary("We cleaned /tmp.")])).toBe("manual");
+    expect(splitPermissionNote(`${bypass}\n\nWe cleaned /tmp.`)).toEqual({ mode: "bypass", summary: "We cleaned /tmp." });
+    expect(splitPermissionNote("We cleaned /tmp.")).toEqual({ mode: null, summary: "We cleaned /tmp." });
   });
 });
 

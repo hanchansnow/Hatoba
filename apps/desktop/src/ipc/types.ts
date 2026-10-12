@@ -874,6 +874,8 @@ export interface AiSettingsView {
   builtin_skill_enabled: boolean;
   /** Sent with every request, at most 32 KB of UTF-8 (AI-36). */
   custom_instructions: string;
+  /** Messages go with the attached terminal's screen unless the panel's + menu turns it off for the conversation (AI-46). */
+  send_terminal_screen: boolean;
 }
 
 /** What `ai_settings_save` changes, like {@link SettingsPatch}; null clears a field that can be empty. */
@@ -974,8 +976,27 @@ export interface AiTurnContext {
   tab: boolean;
   /** The tab's SSH session while it is connected; the system prompt states its server's identification string (§13.1). */
   session_id: string | null;
-  /** MCP servers switched off for this conversation in the tools menu (AI-30, P2). */
+  /** MCP servers switched off for this conversation in **MCP Tools** (AI-30, P2). */
   disabled_mcp_servers: string[];
+  /**
+   * The conversation's permission mode on this device (AI-16), which a `permission_mode` note tells the
+   * model of when it changes (§13.5).
+   */
+  permission_mode: AiPermissionMode;
+  /**
+   * The attached terminal's screen when the message is sent (AI-46), while the tab is connected and
+   * **Send Terminal Screen** is on for the conversation. Rust shows it in a `terminal_state` note of a
+   * stored message.
+   */
+  screen: AiScreen | null;
+}
+
+/** What a `terminal_state` note shows (AI-46, §13.3). */
+export interface AiScreen {
+  /** The screen's last lines, or the whole screen while `alternate`. */
+  text: string;
+  /** A full-screen program (vim, less, …) uses the alternate screen. */
+  alternate: boolean;
 }
 
 export interface AiSendInput {

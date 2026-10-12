@@ -648,6 +648,17 @@ export type AiRevertFailure =
 /**  Anything else; `detail` says what. */
 "failed";
 
+/**
+ *  What a `terminal_state` note shows (AI-46, §13.3). Its `Debug` leaves the text out, like
+ *  every log (§13.1).
+ */
+export type AiScreen = {
+	/**  The screen's last lines, or the whole screen while `alternate`. */
+	text: string,
+	/**  A full-screen program (vim, less, …) uses the alternate screen. */
+	alternate: boolean,
+};
+
 export type AiSearchHit = {
 	conversation_id: string,
 	/**  The first matching entry, or `None` when only the title matched. */
@@ -679,6 +690,7 @@ export type AiSettingsPatch = {
 	search_provider_id?: string | null,
 	builtin_skill_enabled?: boolean | null,
 	custom_instructions?: string | null,
+	send_terminal_screen?: boolean | null,
 };
 
 /**  The synced `Settings.ai` (§5.1). */
@@ -691,6 +703,11 @@ export type AiSettingsView = {
 	builtin_skill_enabled: boolean,
 	/**  Sent with every request, at most 32 KB of UTF-8 (AI-36). */
 	custom_instructions: string,
+	/**
+	 *  Messages go with the attached terminal's screen unless the panel's + menu turns it off for
+	 *  the conversation (AI-46).
+	 */
+	send_terminal_screen: boolean,
 };
 
 /**  The answer to a side question (AI-42), which nothing stores. */
@@ -787,6 +804,18 @@ export type AiTurnContext = {
 	session_id: string | null,
 	/**  MCP servers switched off for this conversation (AI-30, P2). */
 	disabled_mcp_servers: string[],
+	/**
+	 *  The conversation's permission mode on this device (AI-16). The frontend applies it to each
+	 *  call; a message sent in another mode than the model was last told of starts with a
+	 *  `permission_mode` note (§13.5).
+	 */
+	permission_mode: AiPermissionMode,
+	/**
+	 *  The attached terminal's screen as the panel read it for this message (AI-46), while the
+	 *  tab is connected and **Send Terminal Screen** is on for the conversation. Only a stored
+	 *  message (and an idle side question) shows it, in a `terminal_state` note.
+	 */
+	screen: AiScreen | null,
 };
 
 export type AiTurnEndReason = "completed" | "length" | "refused" | 

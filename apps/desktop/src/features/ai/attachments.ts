@@ -14,15 +14,17 @@
  *
  * Before them, Rust stores the notes Hatoba writes itself when a message follows a reply the user
  * stopped, moves the conversation to another host, changes whether a terminal is attached, goes to
- * another model, follows a revert of a file tool's change, or comes with another list of deferred MCP
- * tools (`interrupted`, `host_change`, `terminal_change`, `model_change`, `file_revert`,
- * `mcp_tools`); the panel shows those as dividers. The block
+ * another model, is sent in another permission mode than the model was told of, follows a revert of a
+ * file tool's change, is sent with a connected terminal, or comes with another list of deferred MCP
+ * tools (`interrupted`, `host_change`, `terminal_change`, `model_change`, `permission_mode`,
+ * `file_revert`, `terminal_state`, `mcp_tools`); the panel shows the terminal's screen as a collapsed
+ * block and the others as dividers. The block
  * format and its escaping are specified once, in docs/hatoba-spec.md §13.3
  * ("Attachment blocks"); Rust's `title_of` (src-tauri/src/ai.rs) reads the same blocks to title a
  * conversation.
  */
 
-import type { DroppedFile } from "@/ipc/types";
+import type { AiEntryView, AiPermissionMode, DroppedFile } from "@/ipc/types";
 import { estimateTokens } from "./meter";
 
 /** As for tool results (§13.4): over this many characters, the first 7,500 and the last 22,500 are kept. */
@@ -204,21 +206,33 @@ export function attachmentTokens(a: Attachment): number {
 /**
  * A note Hatoba writes before a message (§13.1, AI-05, AI-09, AI-41), never the user: the reply before
  * it was stopped by the user, or with this message the conversation moved to another host, a terminal
- * became attached or stopped being attached, it went to another model, or the user reverted the change
- * a file tool call made, or this message lists the deferred MCP tools (AI-45). `from` of a host change
- * is empty when the earlier host no longer exists; a model is named as `Name (id)`, or by its ID alone. A
- * revert's `path` is the file's path as the call resolved it, and `body` its text for the model; the
- * MCP tool list counts its servers and tools, and `body` lists them.
+ * became attached or stopped being attached, it went to another model, the permission mode the model
+ * works in changed (AI-16), or the user reverted the change a file tool call made, or this message
+ * shows the attached terminal's screen (AI-46) or lists the deferred MCP tools (AI-45). `from` of a host change is empty when the earlier host no longer exists;
+ * a model is named as `Name (id)`, or by its ID alone. A revert's `path` is the file's path as the call
+ * resolved it, and `body` its text for the model; the screen counts its lines, and `alternate` says a
+ * full-screen program showed it; the MCP tool list counts its servers and tools, and `body` lists them.
  */
 export type Note =
   | { kind: "interrupted" }
   | { kind: "host_change" | "model_change"; from: string; to: string }
   | { kind: "terminal_change"; to: "attached" | "detached" }
+  | { kind: "permission_mode"; mode: AiPermissionMode }
   | { kind: "file_revert"; path: string; toolCallId: string; body: string }
+  | { kind: "terminal_state"; host: string; alternate: boolean; lines: number; body: string }
   | { kind: "mcp_tools"; servers: number; tools: number; body: string };
 
 /** The order Hatoba writes its notes in; a `file_revert` comes once for each reverted call. */
-const NOTE_ORDER = ["interrupted", "host_change", "terminal_change", "model_change", "file_revert", "mcp_tools"] as const satisfies readonly Note["kind"][];
+const NOTE_ORDER = [
+  "interrupted",
+  "host_change",
+  "terminal_change",
+  "model_change",
+  "permission_mode",
+  "file_revert",
+  "terminal_state",
+  "mcp_tools",
+] as const satisfies readonly Note["kind"][];
 
 const attr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const unattr = (s: string) => s.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
@@ -269,18 +283,27 @@ const TERMINAL_BODY = {
   detached: "No terminal is attached from this message on. Screens and command output before this message came from the terminal that was attached then.",
 } as const;
 
+const PERMISSION_BODY = {
+  manual: "From this message on, the permission mode is manual approval.",
+  bypass: "From this message on, the permission mode is bypass.",
+} as const satisfies Record<AiPermissionMode, string>;
+
 const INTERRUPTED_BODY =
   "The user stopped your previous reply before it was finished. It ends where it was cut off; anything you were still writing, tool calls included, was not kept.";
 
 /**
  * A note as Rust writes it (`interrupted_block`, `host_change_block`, `terminal_change_block`,
- * `model_change_block`, `file_revert_block` and `deferred::list_block` in crates/hatoba-ai). The panel never sends one; Rust adds
- * them when it stores a message, and the mock does the same.
+ * `model_change_block`, `permission_mode_block`, `file_revert_block`, `terminal_state_block` and `deferred::list_block` in
+ * crates/hatoba-ai). The panel never sends one; Rust adds them when it stores a message, and the mock
+ * does the same.
  */
 export function noteBlock(n: Note): string {
   if (n.kind === "mcp_tools") return writeBlock(n.kind, [["servers", String(n.servers)], ["tools", String(n.tools)]], n.body);
+  if (n.kind === "terminal_state")
+    return writeBlock(n.kind, [["host", noteText(n.host)], ["alternate_screen", String(n.alternate)], ["lines", String(n.lines)]], n.body);
   if (n.kind === "interrupted") return writeBlock(n.kind, [], INTERRUPTED_BODY);
   if (n.kind === "terminal_change") return writeBlock(n.kind, [["to", n.to]], TERMINAL_BODY[n.to]);
+  if (n.kind === "permission_mode") return writeBlock(n.kind, [["mode", n.mode]], PERMISSION_BODY[n.mode]);
   if (n.kind === "file_revert") return writeBlock(n.kind, [["path", noteText(n.path)], ["tool_call_id", noteText(n.toolCallId)]], n.body);
   const from = noteText(n.from);
   const body =
@@ -288,6 +311,32 @@ export function noteBlock(n: Note): string {
       ? "Earlier replies in this conversation came from another model."
       : `The conversation moved to another host. Screens and command output before this message came from ${from ? `"${from}"` : "another host"}.`;
   return writeBlock(n.kind, [["from", from], ["to", noteText(n.to)]], body);
+}
+
+/** As Rust's `MAX_SCREEN_CHARS` (AI-46): a longer screen keeps its first quarter and the rest from its end. */
+const SCREEN_MAX_CHARS = 4_000;
+
+/**
+ * The `terminal_state` note of a message sent with `screen` (AI-46), as Rust's `terminal_state_block`
+ * writes it: control characters as spaces, blank lines at either end left out, and a long screen cut
+ * like a tool result. Null for a blank screen.
+ */
+export function screenStateNote(host: string, screen: { text: string; alternate: boolean }): Note | null {
+  const lines = screen.text
+    .replace(/\r\n/g, "\n")
+    .replace(/[^\P{Cc}\n\t]/gu, " ")
+    .split("\n")
+    .map((l) => l.trimEnd());
+  const first = lines.findIndex((l) => l !== "");
+  if (first < 0) return null;
+  const shown = lines.slice(first, lines.findLastIndex((l) => l !== "") + 1);
+  const chars = Array.from(shown.join("\n"));
+  const head = SCREEN_MAX_CHARS / 4;
+  const body =
+    chars.length <= SCREEN_MAX_CHARS
+      ? chars.join("")
+      : `${chars.slice(0, head).join("")}\n\n[… ${chars.length - SCREEN_MAX_CHARS} characters left out …]\n\n${chars.slice(chars.length - (SCREEN_MAX_CHARS - head)).join("")}`;
+  return { kind: "terminal_state", host, alternate: screen.alternate, lines: shown.length, body };
 }
 
 /** The note of a revert (AI-41) as Rust's `file_revert_block` words it; `created`: the call created the file, which the revert deleted. */
@@ -328,7 +377,8 @@ export interface MessageParts {
   typed: string;
 }
 
-const OPEN = /^<(interrupted|host_change|terminal_change|model_change|file_revert|mcp_tools|terminal_selection|connection_diagnostics|pasted_text|file)((?: [a-z_]+="[^"]*")*)>\n/;
+const OPEN =
+  /^<(interrupted|host_change|terminal_change|model_change|permission_mode|file_revert|terminal_state|mcp_tools|terminal_selection|connection_diagnostics|pasted_text|file)((?: [a-z_]+="[^"]*")*)>\n/;
 const DIGITS = /^\d+$/;
 
 type Block = { kind: "note"; note: Note } | { kind: "attachment"; attachment: Attachment };
@@ -348,8 +398,16 @@ function blockOf(tag: string, attrs: [string, string][], body: string): Block | 
       const to = names === "to" ? value(0) : "";
       return to === "attached" || to === "detached" ? { kind: "note", note: { kind: tag, to } } : null;
     }
+    case "permission_mode": {
+      const mode = names === "mode" ? value(0) : "";
+      return mode === "manual" || mode === "bypass" ? { kind: "note", note: { kind: tag, mode } } : null;
+    }
     case "file_revert":
       return names === "path,tool_call_id" ? { kind: "note", note: { kind: tag, path: value(0), toolCallId: value(1), body } } : null;
+    case "terminal_state":
+      return names === "host,alternate_screen,lines" && (value(1) === "true" || value(1) === "false") && DIGITS.test(value(2))
+        ? { kind: "note", note: { kind: tag, host: value(0), alternate: value(1) === "true", lines: Number(value(2)), body } }
+        : null;
     case "mcp_tools":
       return names === "servers,tools" && DIGITS.test(value(0)) && DIGITS.test(value(1))
         ? { kind: "note", note: { kind: tag, servers: Number(value(0)), tools: Number(value(1)), body } }
@@ -416,6 +474,34 @@ export function parseMessage(text: string): MessageParts {
     }
     parts.typed = b.rest;
   }
+}
+
+/**
+ * A summary's text (AI-21) split into the `permission_mode` note Rust stores before the summary of a
+ * conversation in bypass, which carries the mode past the compaction, and the summary itself.
+ */
+export function splitPermissionNote(text: string): { mode: AiPermissionMode | null; summary: string } {
+  for (const mode of ["manual", "bypass"] as const) {
+    const note = `${noteBlock({ kind: "permission_mode", mode })}\n\n`;
+    if (text.startsWith(note)) return { mode, summary: text.slice(note.length) };
+  }
+  return { mode: null, summary: text };
+}
+
+/**
+ * AI-16: the permission mode the model was last told of, as Rust's `noted_permission` reads it from a
+ * conversation's entries: the newest `permission_mode` note, or the one the newest summary starts
+ * with. Before any note, and after a summary without one, it is manual approval.
+ */
+export function notedPermission(entries: readonly AiEntryView[]): AiPermissionMode {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.role === "summary") return splitPermissionNote(e.text).mode ?? "manual";
+    if (e.role !== "user") continue;
+    const note = parseMessage(e.text).notes.find((n) => n.kind === "permission_mode");
+    if (note) return note.mode;
+  }
+  return "manual";
 }
 
 /** A model as a `model_change` note names it (`Name (id)`), by its name alone, for the panel. */

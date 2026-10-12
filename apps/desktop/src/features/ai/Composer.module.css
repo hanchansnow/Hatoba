@@ -54,12 +54,13 @@
 }
 
 .model {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   height: 24px;
   min-width: 0;
-  max-width: 62%;
+  overflow: hidden;
   padding: 0 7px;
   border: 0;
   border-radius: var(--radius-md);
@@ -82,6 +83,23 @@
   flex: none;
 }
 
+/* Only the icon fits: a square button like the others in the bar. */
+.modelIconOnly {
+  justify-content: center;
+  width: 26px;
+  padding: 0;
+}
+
+/* The hidden copies that useModelFit measures. */
+.modelMeasure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .modelName {
   min-width: 0;
   overflow: hidden;
@@ -89,8 +107,8 @@
   white-space: nowrap;
 }
 
-/* The thinking level next to the model, when it is not Default (AI-05). In a narrow panel the model
- * name needs the room, and the level stays in the button's tooltip and the menu. */
+/* The thinking level next to the model, Default included (AI-05). Without room for it, it stays in
+ * the button's tooltip and the menu. */
 .modelEffort {
   flex: none;
   padding: 0 5px;
@@ -101,8 +119,9 @@
   white-space: nowrap;
 }
 
+/* A narrow panel shows bypass as its orange lightning alone. */
 @container (max-width: 330px) {
-  .modelEffort {
+  .mode span {
     display: none;
   }
 }
@@ -153,6 +172,15 @@
   stroke: var(--orange);
 }
 
+/* The next message compacts first (AI-22). */
+.meterFull {
+  color: var(--red);
+}
+
+.meterFull .ringValue {
+  stroke: var(--red);
+}
+
 .compact {
   flex: none;
   font-size: var(--text-xs);
@@ -190,6 +218,44 @@
   background: color-mix(in srgb, var(--fg) 85%, var(--win) 15%);
 }
 
+/* AI-16: the permission mode, beside the + menu. */
+.mode {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  min-width: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.mode:hover {
+  background: var(--fill);
+}
+
+/* Its menu is open. */
+.mode[aria-expanded="true"] {
+  background: var(--fill);
+  color: var(--fg);
+}
+
+.modeBypass,
+.modeBypass:hover {
+  background: color-mix(in srgb, var(--orange) 15%, transparent);
+  color: var(--orange);
+}
+
+.modeBypass[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--orange) 24%, transparent);
+  color: var(--orange);
+}
+
 /* AI-42: Ask a Side Question, beside Send / Stop. */
 .side {
   flex: none;
@@ -211,25 +277,6 @@
 
 .side:disabled {
   color: var(--fg3);
-}
-
-/* AI-35: the paperclip, in the look of the tools menu button. */
-.attach {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 24px;
-  border: 0;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--fg2);
-}
-
-.attach:hover {
-  background: var(--fill);
-  color: var(--fg);
 }
 
 /* AI-35: how the next message fits the model's context window. */

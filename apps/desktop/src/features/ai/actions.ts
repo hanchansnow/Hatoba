@@ -38,6 +38,7 @@ import {
   makePaste,
   MESSAGE_MAX_BYTES,
   nextSelection,
+  notedPermission,
   parseMessage,
   textFile,
   type Attachment,
@@ -62,6 +63,7 @@ import {
   NO_SELECTION,
   offersHomeConversation,
   patchSlot,
+  sendsScreen,
   setSlot,
   slotOf,
   updateConversation,
@@ -70,12 +72,14 @@ import {
   type Slot,
   type TabSelection,
 } from "./store";
+import { screenNote } from "./terminalText";
 import { DISCONNECTED, NO_TAB, readTerminal, sendInput } from "./terminalTools";
 import {
   allowanceOf,
   allowanceScope,
   CALL_MCP_TOOL,
   callAllowed,
+  callMode,
   grantKeys,
   mcpOffResult,
   mustAsk,
@@ -131,14 +135,18 @@ export function slotEffort(slotId: string): AiEffort | null {
 /**
  * What a request may act on: the tab's host or quick-connect target and, when connected, its terminal
  * tools and session, whose server's identification string the system prompt states (AI-08, AI-09,
- * §13.1). The home tab names the conversation's own host or target, which leaves it where it is.
+ * §13.1), the permission mode a `permission_mode` note tells the model of (§13.5), and the screen
+ * a message shows while **Send Terminal Screen** is on (AI-46). The home tab names the
+ * conversation's own host or target, which leaves it where it is.
  */
 export function turnContext(slotId: string): AiTurnContext | null {
   const model = slotModel(slotId);
   if (!model) return null;
   const attached = attachedTab(slotId);
   const connected = !!attached && attached.tab.status === "connected";
-  const conversation = getSlot(slotId).conversation;
+  const slot = getSlot(slotId);
+  const term = connected && sendsScreen(slot, useAi.getState().catalog.settings) ? attached.session?.term : undefined;
+  const conversation = slot.conversation;
   return {
     provider_id: model.provider_id,
     model_id: model.model_id,
@@ -147,7 +155,9 @@ export function turnContext(slotId: string): AiTurnContext | null {
     target: attached ? attached.tab.target : (conversation?.quick_target ?? null),
     tab: connected,
     session_id: connected ? (attached.tab.sessionId ?? null) : null,
-    disabled_mcp_servers: getSlot(slotId).mcpOff,
+    disabled_mcp_servers: slot.mcpOff,
+    permission_mode: slot.mode,
+    screen: term ? screenNote(term.buffer.active, term.rows) : null,
   };
 }
 
@@ -206,6 +216,8 @@ class TurnRunner {
   slotId: string;
   /** The tab the turn started on, the only one whose terminal its tools may use (AI-08). */
   private readonly tab: string;
+  /** The permission mode the model was told of for this turn (§13.5); a switch to bypass waits for the next message. */
+  private readonly mode: AiPermissionMode;
   convId: string | null;
   private ended = false;
   private disposed = false;
@@ -216,10 +228,11 @@ class TurnRunner {
   private readonly ready: Promise<string | null>;
   private resolveReady!: (id: string | null) => void;
 
-  constructor(slotId: string, convId: string | null) {
+  constructor(slotId: string, convId: string | null, mode: AiPermissionMode) {
     this.slotId = slotId;
     this.tab = slotId;
     this.convId = convId;
+    this.mode = mode;
     this.ready = new Promise((resolve) => (this.resolveReady = resolve));
     if (convId) this.resolveReady(convId);
   }
@@ -391,7 +404,7 @@ class TurnRunner {
     // tab's host for commands and tools; and §13.5's commands that only read.
     const target = this.target();
     const host = target ? hostRefOf(target.tab) : null;
-    const mode = getSlot(this.slotId).mode;
+    const mode = callMode(this.mode, getSlot(this.slotId).mode);
     const saved = kind !== "mcp" && needsApproval(kind, mode) ? await savedAllowances().catch(() => []) : [];
     if (!this.acting) return;
     const allowed = callAllowed(kind, parseArgs(call.arguments) ?? {}, mcp, useAi.getState().allowed[convId] ?? [], saved, host);
@@ -480,12 +493,16 @@ class TurnRunner {
   }
 }
 
-/** A new conversation keeps what was chosen in its slot before it had an id: the mode (AI-16) and the tools menu (AI-30). */
+/**
+ * A new conversation keeps what was chosen in its slot before it had an id: the mode (AI-16), the
+ * tools menu (AI-30) and Send Terminal Screen (AI-46).
+ */
 function rememberChoices(slotId: string, convId: string) {
-  const { mode, mcpOff } = getSlot(slotId);
+  const { mode, mcpOff, screen } = getSlot(slotId);
   useAi.setState((st) => ({
     modes: mode !== defaultMode() || st.modes[convId] ? { ...st.modes, [convId]: mode } : st.modes,
     mcpOff: mcpOff.length > 0 || st.mcpOff[convId] ? { ...st.mcpOff, [convId]: mcpOff } : st.mcpOff,
+    screens: screen !== null ? { ...st.screens, [convId]: screen } : st.screens,
   }));
 }
 
@@ -539,7 +556,7 @@ export async function sendMessage(slotId: string, raw: string): Promise<boolean>
   runners.get(slotId)?.dispose(); // Rust stops that turn when the message arrives
 
   const { text, extras, restore } = takeAttachments(slotId, typed);
-  const runner = new TurnRunner(slotId, slot.conversationId);
+  const runner = new TurnRunner(slotId, slot.conversationId, context.permission_mode);
   runners.set(slotId, runner);
   const local: AiEntryView = { role: "user", entry_id: LOCAL_ENTRY, created_at: Date.now(), text };
   patchSlot(slotId, (s) => ({
@@ -712,7 +729,9 @@ export async function retryTurn(slotId: string) {
     return;
   }
   discardSideQuestion(slotId);
-  const runner = new TurnRunner(slotId, id);
+  // A retry stores no message, so no note tells the model of a switch since (§13.5): it works in the
+  // mode its messages named.
+  const runner = new TurnRunner(slotId, id, notedPermission(slot.entries));
   runners.set(slotId, runner);
   patchSlot(slotId, { turn: newTurn(), outcome: null, effortIgnored: false });
   try {
@@ -782,11 +801,12 @@ export async function editAndResend(slotId: string, entryId: string, raw: string
   }
   discardSideQuestion(slotId);
 
-  const runner = new TurnRunner(slotId, id);
+  const runner = new TurnRunner(slotId, id, context.permission_mode);
   runners.set(slotId, runner);
-  // Rust keeps the notes of the message it replaces (AI-05, AI-09), so its dividers stay while it is sent.
+  // Rust keeps the notes of the message it replaces (AI-05, AI-09), so its dividers stay while it is sent;
+  // the screen and the permission mode it works out again (AI-46, §13.5).
   const original = now.entries.find((e) => e.entry_id === entryId);
-  const kept = original?.role === "user" ? parseMessage(original.text).notes : [];
+  const kept = original?.role === "user" ? parseMessage(original.text).notes.filter((n) => n.kind !== "terminal_state" && n.kind !== "permission_mode") : [];
   const local: AiEntryView = { role: "user", entry_id: LOCAL_ENTRY, created_at: Date.now(), text: composeMessage(text, [], kept) };
   patchSlot(slotId, (s) => ({ entries: [...entriesBefore(s.entries, entryId), local], turn: newTurn(), outcome: null, effortIgnored: false }));
   try {
@@ -1065,6 +1085,7 @@ export async function openConversation(slotId: string, id: string, reveal: strin
     conversation: known,
     loading: true,
     mcpOff: st.mcpOff[id] ?? [],
+    screen: st.screens[id] ?? null,
     reveal,
   });
   await reloadSlot(slotId);
@@ -1157,6 +1178,13 @@ export function setMcpServerOff(slotId: string, serverId: string, off: boolean) 
   patchSlot(slotId, { mcpOff });
   const id = slot.conversationId;
   if (id) useAi.setState((st) => ({ mcpOff: { ...st.mcpOff, [id]: mcpOff } }));
+}
+
+/** AI-46: whether the slot's conversation shows the terminal's screen with each message, until the app quits. */
+export function setSlotScreen(slotId: string, on: boolean) {
+  const id = getSlot(slotId).conversationId;
+  patchSlot(slotId, { screen: on });
+  if (id) useAi.setState((st) => ({ screens: { ...st.screens, [id]: on } }));
 }
 
 // ───────────────────────── the terminal selection (AI-10) ─────────────────────────
@@ -1294,7 +1322,7 @@ export async function readTextFiles(files: readonly File[]): Promise<FileAttachm
   return read;
 }
 
-/** The paperclip, or files dropped on the panel: they go with the slot's next message. */
+/** Add Text Files in the + menu, or files dropped on the panel: they go with the slot's next message. */
 export async function attachFiles(slotId: string, files: readonly File[]) {
   for (const file of await readTextFiles(files)) if (!addExtra(slotId, file)) break;
   focusInput();

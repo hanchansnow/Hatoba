@@ -1233,6 +1233,9 @@ pub struct AiSettingsView {
     pub builtin_skill_enabled: bool,
     /// Sent with every request, at most 32 KB of UTF-8 (AI-36).
     pub custom_instructions: String,
+    /// Messages go with the attached terminal's screen unless the panel's + menu turns it off for
+    /// the conversation (AI-46).
+    pub send_terminal_screen: bool,
 }
 
 /// What `ai_settings_save` changes in `Settings.ai`, like [`SettingsPatch`]: a field left out keeps
@@ -1249,6 +1252,7 @@ pub struct AiSettingsPatch {
     pub search_provider_id: Clearable<String>,
     pub builtin_skill_enabled: Option<bool>,
     pub custom_instructions: Option<String>,
+    pub send_terminal_screen: Option<bool>,
 }
 
 /// A patch field that `null` clears.
@@ -1543,6 +1547,36 @@ pub struct AiTurnContext {
     pub session_id: Option<String>,
     /// MCP servers switched off for this conversation (AI-30, P2).
     pub disabled_mcp_servers: Vec<String>,
+    /// The conversation's permission mode on this device (AI-16). The frontend applies it to each
+    /// call; a message sent in another mode than the model was last told of starts with a
+    /// `permission_mode` note (§13.5).
+    pub permission_mode: AiPermissionMode,
+    /// The attached terminal's screen as the panel read it for this message (AI-46), while the
+    /// tab is connected and **Send Terminal Screen** is on for the conversation. Only a stored
+    /// message (and an idle side question) shows it, in a `terminal_state` note.
+    pub screen: Option<AiScreen>,
+}
+
+/// What a `terminal_state` note shows (AI-46, §13.3). Its `Debug` leaves the text out, like
+/// every log (§13.1).
+#[derive(Clone, Deserialize, Type, PartialEq, Eq)]
+pub struct AiScreen {
+    /// The screen's last lines, or the whole screen while `alternate`.
+    pub text: String,
+    /// A full-screen program (vim, less, …) uses the alternate screen.
+    pub alternate: bool,
+}
+
+impl fmt::Debug for AiScreen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiScreen")
+            .field(
+                "text",
+                &format_args!("<{} chars>", self.text.chars().count()),
+            )
+            .field("alternate", &self.alternate)
+            .finish()
+    }
 }
 
 #[derive(Clone, Deserialize, Type)]

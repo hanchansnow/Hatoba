@@ -20,10 +20,10 @@ import {
   tooMuchMessage,
   type Decision,
 } from "./actions";
-import { AttachmentCardFor, AttachmentChipFor } from "./AttachmentChips";
+import { AttachmentCardFor, AttachmentChipFor, ScreenCard } from "./AttachmentChips";
 import { FileChange } from "./FileChange";
 import { useFilePreview } from "./filePreview";
-import { composeMessage, fitsMessage, isLongPaste, makePaste, parseMessage, type MessageParts, type Note } from "./attachments";
+import { composeMessage, fitsMessage, isLongPaste, makePaste, parseMessage, splitPermissionNote, type MessageParts, type Note } from "./attachments";
 import { insertAtCaret, isPlainPasteKey } from "./Composer";
 import { forkPoints } from "./fork";
 import { Markdown } from "./Markdown";
@@ -241,7 +241,7 @@ export function MessageList({ slotId, slot, host, empty }: { slotId: string; slo
             break;
           }
           case "summary":
-            body = <SummaryBlock text={entry.text} flash={flashed} />;
+            body = <SummaryBlock text={splitPermissionNote(entry.text).summary} flash={flashed} />;
             break;
           case "tool":
             return null; // shown in its call's block
@@ -334,7 +334,9 @@ function UserMessage({
   const [editing, setEditing] = useState(false);
   // AI-10, AI-35: what was attached to the message is in blocks at its start, after Hatoba's notes.
   const parts = useMemo(() => parseMessage(text), [text]);
-  const notes = parts.notes.map((note, i) => <NoteDivider key={i} note={note} />);
+  const notes = parts.notes.filter((note) => note.kind !== "terminal_state").map((note, i) => <NoteDivider key={i} note={note} />);
+  // AI-46: the screen the message showed is a collapsed block above its attachments.
+  const screen = parts.notes.find((note) => note.kind === "terminal_state");
   if (editing && onResend)
     return (
       <>
@@ -352,6 +354,7 @@ function UserMessage({
           {onFork && <ForkButton onFork={onFork} />}
         </div>
         <div className={s.userStack}>
+          {screen?.kind === "terminal_state" && <ScreenCard note={screen} />}
           {parts.attachments.map((a, i) => (
             <AttachmentCardFor key={i} attachment={a} />
           ))}
@@ -363,7 +366,14 @@ function UserMessage({
   );
 }
 
-const NOTE_ICONS = { interrupted: "stop-circle", host_change: "arrows-left-right", model_change: "swap", file_revert: "arrow-counter-clockwise", mcp_tools: "plug" } as const;
+const NOTE_ICONS = {
+  interrupted: "stop-circle",
+  host_change: "arrows-left-right",
+  model_change: "swap",
+  file_revert: "arrow-counter-clockwise",
+  terminal_state: "terminal-window",
+  mcp_tools: "plug",
+} as const;
 
 /**
  * A note Hatoba stored before a message: the user stopped the reply before it, the conversation moved
@@ -372,7 +382,16 @@ const NOTE_ICONS = { interrupted: "stop-circle", host_change: "arrows-left-right
  */
 function NoteDivider({ note }: { note: Note }) {
   const t = useT();
-  const icon = note.kind === "terminal_change" ? (note.to === "attached" ? "plugs-connected" : "plugs") : NOTE_ICONS[note.kind];
+  const icon =
+    note.kind === "terminal_change"
+      ? note.to === "attached"
+        ? "plugs-connected"
+        : "plugs"
+      : note.kind === "permission_mode"
+        ? note.mode === "bypass"
+          ? "lightning"
+          : "shield-check"
+        : NOTE_ICONS[note.kind];
   return (
     <div className={s.noteDivider} role="note" title={noteTitle(t, note)}>
       <span className={s.noteText}>

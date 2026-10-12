@@ -25,8 +25,8 @@ The AI assistant is a chat panel at the right edge of the window, below the tab 
 
 The panel shows the conversation of the active tab, and switching tabs switches the panel. Every terminal tab has its own conversation, and the home tab (host list, Keys, Cloud Sync) has a chat-only one. A tab shows a small sparkle while its assistant is working and a hand while it waits for your approval.
 
-- Header: the conversation title, the tab's host, the permission mode button, **History**, **New Conversation**, and close.
-- Input area: attachment chips, a text box (Enter sends, Shift+Enter adds a line; nothing is sent while an input method is composing), the **Model** picker, the **MCP tools** button, the paperclip, the context meter, **Ask a Side Question**, and **Send (Enter)** (replaced by **Stop** while a turn runs). A second message cannot be sent while the first is still starting (during its compaction, say).
+- Header: the conversation title, the tab's host, **History**, **New Conversation**, and close.
+- Input area: attachment chips, a text box (Enter sends, Shift+Enter adds a line; nothing is sent while an input method is composing), under it on the left the + button (**Add Files and More**, a menu with **Add Text Files…**, **Send Terminal Screen** and **MCP Tools**) and the permission mode button, and on the right the context meter, the **Model** picker, **Ask a Side Question**, and **Send (Enter)** (replaced by **Stop** while a turn runs). A second message cannot be sent while the first is still starting (during its compaction, say).
 - Messages: each of yours shows the time you sent it, and each reply, once it is finished, the time it ended (hover for the full date and time). **Copy** next to one of your messages copies what you typed, without the attachments; **Copy** under a reply copies its Markdown, without the reasoning and tool calls, and a reply that used tools is copied whole, with its text from before and after the calls. **Fork from Here** beside them copies the conversation up to that point into a new one (`references/ai-history.md`).
 - A conversation acts only on its own tab, never on another, in either permission mode. While the tab is disconnected or still connecting, the terminal tools are unavailable (the panel says so and offers **Reconnect**). Closing a tab detaches its conversation; it stays in History.
 - Opening a conversation from History attaches it to the active tab. If that tab's host differs, the panel says so, and the next message moves the conversation to the tab's host. That message gets a divider above it, "Moved to <new host> (was on <old host>)", and the assistant is told that the screens and command output before it came from the old host. A conversation that is running a turn, waiting for approval or compacting in another tab is not moved: that tab is brought to the front instead, because its turn acts on that tab's terminal. To continue on another host and leave the original where it is, fork it instead.
@@ -44,7 +44,8 @@ The panel shows the conversation of the active tab, and switching tabs switches 
 | Compact | 压缩 | 圧縮 |
 | Send (Enter) | 发送（Enter） | 送信（Enter） |
 | Stop | 停止 | 停止 |
-| MCP tools | MCP 工具 | MCP ツール |
+| Add Files and More | 添加文件等 | ファイルなどを追加 |
+| MCP Tools | MCP 工具 | MCP ツール |
 | The assistant is working | AI 助手正在工作 | アシスタントが作業中です |
 | The assistant is waiting for you | AI 助手在等你确认 | アシスタントが確認を待っています |
 | Reconnect | 重新连接 | 再接続 |
@@ -52,79 +53,11 @@ The panel shows the conversation of the active tab, and switching tabs switches 
 
 ## Tools and approvals
 
-| en | zh-CN | ja |
-|---|---|---|
-| Read terminal | 读取终端 | ターミナルを読み取る |
-| Run command | 运行命令 | コマンドを実行 |
-| Type in terminal | 向终端输入 | ターミナルに入力 |
-| Read file | 读取文件 | ファイルを読む |
-| Edit file | 编辑文件 | ファイルを編集 |
-| Write file | 写入文件 | ファイルに書き込む |
-| Web search | 搜索网页 | Web 検索 |
-| Fetch page | 读取网页 | ページを取得 |
-| Read skill | 读取技能 | スキルを読む |
-| Search MCP tools | 搜索 MCP 工具 | MCP ツールを検索 |
-
-| Tool | What it does | Manual approval mode |
-|---|---|---|
-| **Read terminal** (`read_terminal`) | Returns the visible screen plus up to 100 lines of scrollback (at most 1,000) as text, and whether a full-screen program (vim, htop) is active | Runs without asking |
-| **Run command** (`run_command`) | Runs a command on a new exec channel of the tab's SSH connection and returns stdout, stderr and the exit status. It has no PTY, does not share the shell's directory, environment or sudo session, and its output does not show in the terminal. Timeout 120 s by default, at most 600 s | Asks, unless it only reads (`ls`, `git status`, …) or is allowed |
-| **Type in terminal** (`send_input`) | Types text into the shell as the keyboard would, optionally followed by Enter, Tab, Esc, Ctrl+C, Ctrl+D or an arrow key, then waits for output (10 s by default, at most 120 s). A command started this way keeps running if the turn is stopped | Asks, unless allowed |
-| **Read file** (`read_file`) | Returns a text file on the tab's host as numbered lines, a page of up to 30,000 characters at a time. Binary files and anything but regular files are refused; edits and writes refuse files over 1 MB. Like the other file tools it never uses sudo | Runs without asking |
-| **Edit file** (`edit_file`) | Replaces an exact piece of text in a file on the host and writes the file back in place, keeping its owner, mode and line breaks. Refused, in every mode, unless the assistant read the file in this conversation and it has not changed since. The approval card shows the diff; **Edit** changes the new text | Asks, unless allowed |
-| **Write file** (`write_file`) | Creates a file on the host or replaces its content, which needs the same read as Edit file. The approval card shows the content, or a diff for an existing file. Both can be reverted (`references/ai-file-changes.md`) | Asks, unless allowed |
-| **Web search** (`web_search`) | Searches with the search provider chosen in Settings → AI. Not offered when none is chosen | Runs without asking |
-| **Fetch page** (`fetch_url`) | Fetches an http or https page without cookies, converts HTML to Markdown and returns up to 30,000 characters at a time. Addresses on loopback, private or link-local networks are refused | Asks, unless allowed |
-| **Read skill** (`read_skill`) | Reads an enabled skill's instructions or one of its files | Runs without asking |
-| MCP tools (`mcp__<server>__<tool>`) | Tools from the MCP servers the user added (shown as server · tool) | Ask, unless set to Always allow |
-| **Search MCP tools** (`search_tools`) | With many MCP tools (see MCP tools menu), finds them by keywords or name and returns their descriptions and input schemas | Runs without asking |
-| `call_mcp_tool` | Calls an MCP tool by name; shown, approved and allowed as that tool | As that tool |
-
-Results longer than 30,000 characters keep the first 7,500 and the last 22,500 (MCP tools: 50,000). Every call and result is a collapsible block in the conversation, in both modes. Tool results are data to the assistant: when one asks for something, it tells you instead.
-
-**Permission mode** (the shield or lightning button in the header; the menu is titled "Permission mode for this conversation"):
-
-| en | zh-CN | ja |
-|---|---|---|
-| Permission mode | 权限模式 | 権限モード |
-| Manual approval | 手动批准 | 手動承認 |
-| Bypass | 绕过批准 | 承認をバイパス |
-| Bypass | 绕过 | バイパス |
-| Turn On Bypass | 绕过批准 | 承認をバイパス |
-
-- **Manual approval** (the default): tools marked "Asks" wait for you.
-- **Bypass**: every tool runs without asking, except tools of MCP servers set to **Always ask**. It is riskier: text on the screen or in a page can steer the assistant. Switching to Bypass for the first time on a device shows a confirmation ("Let the assistant act without asking?", button **Turn On Bypass**).
-- The switch changes the current conversation on this device until the app quits. The default for new conversations is Settings → AI → **This Device** → **Default Permission Mode** (device-local, not synced).
-
-| en | zh-CN | ja |
-|---|---|---|
-| AI | AI | AI |
-| This Device | 此设备 | このデバイス |
-| Default Permission Mode | 默认权限模式 | 既定の権限モード |
-| Default Model | 默认模型 | 既定のモデル |
-| Always ask | 始终询问 | 常に確認 |
-
-An approval card appears in the conversation for a call that needs approval. It shows the tool, the host and the full input (the command and timeout, the text and key, the URL, or an MCP server with the tool's description and arguments). Nothing in the input is hidden: every line shows, with each line break marked ↵, and a chip gives the number of lines when there are several. Hidden control and bidirectional characters (a tab, an escape sequence, a text-direction override) show as escapes such as `\t`, `\x1b` or `\u{202e}`, with a chip "Hidden characters shown as escapes".
-
-| en | zh-CN | ja |
-|---|---|---|
-| Needs approval | 等待批准 | 承認待ち |
-| Run | 运行 | 実行 |
-| Edit | 编辑 | 編集 |
-| Reject | 拒绝 | 拒否 |
-| Allow for This Conversation | 在此对话中允许 | この会話では許可 |
-| Always Allow | 总是允许 | 常に許可 |
-| Always Allow on This Host | 在此主机上总是允许 | このホストでは常に許可 |
-| Reason (optional, sent to the model) | 理由（可选，会告诉模型） | 理由（任意、モデルに伝えられます） |
-| Hidden characters shown as escapes | 不可见的字符已显示为转义 | 見えない文字をエスケープで表示 |
-
-- **Run** runs the call. **Edit** changes the input first (the model is told what you changed). **Reject** takes an optional reason that goes back to the model.
-- **Allow for This Conversation** lets later calls it covers run without asking until the app quits; **Always Allow** saves that on this device. The buttons name what they cover, such as "Always Allow “git pull” on This Host" or "Always Allow example.com"; **Saved Approvals** in `references/ai-settings.md` has the rules. An edit or write card that shows why it can't apply offers neither, and a call whose tool cannot be named (its server was deleted, say) always asks, in both modes.
-- **Stop**, or Esc while focus is in the panel, ends a turn; it sends nothing to the terminal. A reply stopped mid-stream keeps its text so far, and the next message gets a "Previous reply stopped" divider.
+The tools (read the terminal, run commands, type into the shell, read, edit and write files, search the web, fetch pages, read skills, MCP tools), the permission modes (**Manual approval**, **Bypass**) and the approval card (**Run**, **Edit**, **Reject**, **Allow for This Conversation**, **Always Allow**) are in `references/ai-tools.md`.
 
 ## Attachments
 
-What goes with a message is covered in `references/ai-attachments.md`: the terminal selection, **Ask AI** about a failed connection (diagnostics), long pastes (Ctrl+Shift+V pastes as text), and text files attached with the paperclip, the clipboard or a drop on the panel.
+What goes with a message is covered in `references/ai-attachments.md`: the terminal's screen, the terminal selection, **Ask AI** about a failed connection (diagnostics), long pastes (Ctrl+Shift+V pastes as text), and text files attached from the + menu, the clipboard or a drop on the panel.
 
 ## Model, thinking level, context and compaction
 
@@ -136,7 +69,7 @@ The **Model** picker (with its **Thinking Level** row), the context meter, **Com
 
 ## MCP tools menu
 
-The plug button in the input area (**MCP tools**) lists the MCP servers that are on for this device, with their state, and a switch for each. Switching one off removes its tools from this conversation until the app quits, and stops its calls in a running turn too: they return an error result. **Manage in Settings → AI** opens the settings. Adding, editing and enabling servers is in `references/ai-settings.md`.
+**MCP Tools** in the input area's + menu shows, in place of the menu, the MCP servers that are on for this device, with their state, and a switch for each; the back arrow (or ←) returns to the menu. The item shows how many of them this conversation uses, such as 2/3, and a red dot marks it and the + button while a server has an error. Switching one off removes its tools from this conversation until the app quits, and stops its calls in a running turn too: they return an error result. **Manage in Settings → AI** opens the settings. Adding, editing and enabling servers is in `references/ai-settings.md`.
 
 Once a conversation's MCP tool definitions would take a tenth of the model's context window (3,200 tokens when it is not set), or a request would carry over 128 tools in all, they stop going with each request from then on, which keeps the provider's prompt cache working. A message lists the tools by name instead, shown as a divider "Listed N MCP tools" (列出了 N 个 MCP 工具, MCP ツールを N 個一覧にしました). The assistant calls a listed tool directly, or finds one with **Search MCP tools**.
 

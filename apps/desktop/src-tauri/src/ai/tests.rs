@@ -34,8 +34,9 @@ use super::{
 use super::{Halt, Streamed, Turn, append, lock, side_parts, title_of, wait_for_results};
 use crate::dto::{
     AiConversationDetail, AiEffort, AiEntryView, AiFileChangeState, AiFileRevert, AiFinish,
-    AiRevertFailure, AiSendInput, AiSendStarted, AiSideAnswer, AiSideEvent, AiSideQuestionInput,
-    AiToolResultInput, AiToolStatus, AiTurnContext, AiTurnEndReason, AiTurnEvent, QuickTarget,
+    AiPermissionMode, AiRevertFailure, AiScreen, AiSendInput, AiSendStarted, AiSideAnswer,
+    AiSideEvent, AiSideQuestionInput, AiToolResultInput, AiToolStatus, AiTurnContext,
+    AiTurnEndReason, AiTurnEvent, QuickTarget,
 };
 use crate::error::{AppResult, ErrorCode};
 use crate::mcp::McpManager;
@@ -351,6 +352,8 @@ impl Fixture {
             tab: true,
             session_id: None,
             disabled_mcp_servers: Vec::new(),
+            permission_mode: AiPermissionMode::Manual,
+            screen: None,
         }
     }
 
@@ -2846,6 +2849,8 @@ async fn a_message_with_attachments_as_large_as_the_panel_allows_is_stored_whole
 
 #[test]
 fn search_finds_titles_and_message_text_once_per_conversation() {
+    use hatoba_ai::tools::{PermissionMode, permission_mode_block, terminal_state_block};
+
     let vault: SharedVault = {
         let mut vault = Vault::open_in_memory().unwrap();
         vault
@@ -2887,7 +2892,14 @@ fn search_finds_titles_and_message_text_once_per_conversation() {
     let (disk, disk_ids) = conversation(
         "Disk usage on prod",
         &[
-            AiEntry::user(1, "how full is /var?"),
+            AiEntry::user(
+                1,
+                format!(
+                    "{}{}how full is /var?",
+                    permission_mode_block(PermissionMode::Bypass),
+                    terminal_state_block("prod", false, "$ df\nscreen-needle")
+                ),
+            ),
             answer("It is at 42% now."),
             AiEntry::tool(3, "call_1", ToolStatus::Ok, "tool-only-needle"),
         ],
@@ -2897,7 +2909,10 @@ fn search_finds_titles_and_message_text_once_per_conversation() {
         &[
             AiEntry::user(1, "The NGINX config\nhas a typo"),
             AiEntry::user(2, "nginx again"),
-            AiEntry::summary(3, &long),
+            AiEntry::summary(
+                3,
+                format!("{}{long}", permission_mode_block(PermissionMode::Bypass)),
+            ),
             AiEntry::user(4, "Ärger mit Umlauten"),
         ],
     );
@@ -2919,8 +2934,12 @@ fn search_finds_titles_and_message_text_once_per_conversation() {
     let hits = search("42%");
     assert_eq!(hits[0].entry_id.as_deref(), Some(disk_ids[1].as_str()));
     assert_eq!(hits[0].snippet, "It is at 42% now.");
-    // Tool results are not searched.
+    // Tool results are not searched, and neither is the screen a message showed (AI-46) or the
+    // permission mode note of a message or a summary (§13.5).
     assert!(search("tool-only-needle").is_empty());
+    assert!(search("screen-needle").is_empty());
+    assert!(search("bypass").is_empty());
+    assert_eq!(search("/var")[0].snippet, "how full is /var?");
     // One hit per conversation: the first matching entry, before the title.
     let hits = search("nginx");
     assert_eq!(hits.len(), 1);
@@ -3599,6 +3618,152 @@ async fn the_prompt_names_the_model_and_the_server_and_carries_instructions_and_
     let system = system_of(&f.requests().await[2]);
     assert!(!system.contains("SSH server"), "{system}");
     assert!(system.contains("<user_instructions>"), "{system}");
+}
+
+#[tokio::test]
+async fn a_switch_of_permission_mode_is_noted_once_and_keeps_the_system_prompt() {
+    use hatoba_ai::tools::{PermissionMode, permission_mode_block};
+
+    let f = Fixture::new((0..4).map(|i| answer(&format!("Answer {i}."))).collect()).await;
+    let bypass = || AiTurnContext {
+        permission_mode: AiPermissionMode::Bypass,
+        ..f.context()
+    };
+    // §13.5: a first message in bypass names it, and only a switch adds another note; manual
+    // approval, which the system prompt starts in, needed none before.
+    let (conv, _) = f.exchange(None, "first", bypass()).await;
+    f.exchange(Some(&conv), "second", bypass()).await;
+    f.exchange(Some(&conv), "third", f.context()).await;
+    f.exchange(Some(&conv), "fourth", f.context()).await;
+    assert_eq!(
+        f.user_texts(&conv),
+        [
+            format!("{}first", permission_mode_block(PermissionMode::Bypass)),
+            "second".to_owned(),
+            format!("{}third", permission_mode_block(PermissionMode::Manual)),
+            "fourth".to_owned(),
+        ]
+    );
+    // The system prompt never changes with the mode, so the provider's cache keeps serving it.
+    let requests = f.requests().await;
+    let first = system_of(&requests[0]);
+    assert!(requests.iter().all(|r| system_of(r) == first));
+    assert!(
+        first.contains("\n- Permission mode: the newest <permission_mode> note says"),
+        "{first}"
+    );
+}
+
+#[tokio::test]
+async fn a_summary_carries_the_permission_mode_past_a_compaction() {
+    use hatoba_ai::tools::{PermissionMode, permission_mode_block};
+
+    let f = Fixture::new(vec![
+        answer("First answer."),
+        answer("SUMMARY: the disk is full."),
+        answer("Next answer."),
+    ])
+    .await;
+    let bypass = AiTurnContext {
+        permission_mode: AiPermissionMode::Bypass,
+        ..f.context()
+    };
+    let (conv, _) = f.exchange(None, "first question", bypass.clone()).await;
+    let summary = f
+        .manager
+        .compact(&f.vault, f.env.as_ref(), &conv, &bypass)
+        .await
+        .unwrap();
+    // The model sees nothing before a summary, so the summary keeps the mode it was told of.
+    let note = permission_mode_block(PermissionMode::Bypass);
+    let AiEntryView::Summary { text, .. } = &summary else {
+        panic!("expected a summary, got {summary:?}");
+    };
+    assert_eq!(text, &format!("{note}SUMMARY: the disk is full."));
+    // So the next message in bypass needs no note of its own, and the request starts the summary's
+    // message with it, outside the summary's block.
+    f.exchange(Some(&conv), "next question", bypass).await;
+    assert_eq!(f.user_texts(&conv).last().unwrap(), "next question");
+    let last = f.requests().await.pop().unwrap();
+    let carried = user_messages(&last);
+    assert!(
+        carried[0].starts_with(&format!("{note}This conversation continues")),
+        "{carried:?}"
+    );
+}
+
+#[tokio::test]
+async fn each_message_shows_the_screen_it_was_sent_with() {
+    use hatoba_ai::tools::{
+        PermissionMode, permission_mode_block, terminal_change_block, terminal_state_block,
+    };
+
+    let f = Fixture::new((0..6).map(|i| answer(&format!("Answer {i}."))).collect()).await;
+    let prod = f.add_host("prod-db", "");
+    let on_prod = |text: &str, alternate| AiTurnContext {
+        host_id: Some(prod.clone()),
+        screen: Some(AiScreen {
+            text: text.into(),
+            alternate,
+        }),
+        ..f.context()
+    };
+
+    // The first message shows it too, and each one the screen it was sent with (AI-46).
+    let (conv, _) = f
+        .exchange(None, "first", on_prod("$ make\nerror", false))
+        .await;
+    f.exchange(Some(&conv), "second", on_prod("~\n\"a.conf\" 3L", true))
+        .await;
+    // A blank screen shows nothing.
+    f.exchange(Some(&conv), "third", on_prod("\n  \n", false))
+        .await;
+    // Nor does a tab that is not connected, whatever the panel sent.
+    let detached = AiTurnContext {
+        tab: false,
+        ..on_prod("$ stale", false)
+    };
+    f.exchange(Some(&conv), "fourth", detached).await;
+    // Nor a message the panel sends without one, as while **Send Terminal Screen** is off.
+    let quiet = AiTurnContext {
+        screen: None,
+        ..on_prod("", false)
+    };
+    f.exchange(Some(&conv), "fifth", quiet).await;
+    // The screen comes after the other notes.
+    let bypass = AiTurnContext {
+        permission_mode: AiPermissionMode::Bypass,
+        ..on_prod("$ back", false)
+    };
+    f.exchange(Some(&conv), "sixth", bypass).await;
+
+    assert_eq!(
+        f.user_texts(&conv),
+        [
+            format!(
+                "{}first",
+                terminal_state_block("prod-db", false, "$ make\nerror")
+            ),
+            format!(
+                "{}second",
+                terminal_state_block("prod-db", true, "~\n\"a.conf\" 3L")
+            ),
+            "third".to_owned(),
+            format!("{}fourth", terminal_change_block(false)),
+            format!("{}fifth", terminal_change_block(true)),
+            format!(
+                "{}{}sixth",
+                permission_mode_block(PermissionMode::Bypass),
+                terminal_state_block("prod-db", false, "$ back")
+            ),
+        ]
+    );
+    // The note goes to the model as part of the message, and never titles the conversation.
+    let last = f.requests().await.pop().unwrap();
+    assert!(user_messages(&last).last().unwrap().contains(
+        "\n\n<terminal_state host=\"prod-db\" alternate_screen=\"false\" lines=\"1\">\n$ back\n"
+    ));
+    assert_eq!(title_of(&f.user_texts(&conv)[0]), "first");
 }
 
 #[tokio::test]

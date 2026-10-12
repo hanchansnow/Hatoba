@@ -1,5 +1,5 @@
 import type { TabSource } from "@/app/tabs";
-import { fileRevertNote, noteBlock, parseMessage, type Note } from "@/features/ai/attachments";
+import { fileRevertNote, noteBlock, notedPermission, parseMessage, screenStateNote, splitPermissionNote, type Note } from "@/features/ai/attachments";
 import { effectiveEffort, modelEfforts } from "@/features/ai/effort";
 import { forkCopies } from "@/features/ai/fork";
 import { movedFrom, moves, recordedTarget } from "@/features/ai/place";
@@ -639,6 +639,11 @@ export function createAiMock(deps: AiMockDeps): AiApi {
     return compactNow(c, turn);
   }
 
+  /** Like Rust's `store_summary` (AI-16): a summary of a conversation in bypass starts with its note. */
+  function summaryText(c: Conv, summary: string): string {
+    return notedPermission(c.entries) === "bypass" ? `${noteBlock({ kind: "permission_mode", mode: "bypass" })}\n\n${summary}` : summary;
+  }
+
   async function compactNow(c: Conv, turn: Turn): Promise<boolean> {
     turn.compacted = true;
     compacting.add(c.view.id);
@@ -649,9 +654,12 @@ export function createAiMock(deps: AiMockDeps): AiApi {
       role: "summary",
       entry_id: newId(),
       created_at: Date.now(),
-      text: zh
-        ? `**之前的对话摘要（自动压缩）**：共 ${c.entries.length} 条记录。用户和助手讨论了这台主机的状态；用户最新的请求是：“${lastUser(c).text}”`
-        : `**Summary of the earlier conversation (compacted automatically)**: ${c.entries.length} entries. The user and the assistant went over this host’s state; the user’s latest request is: “${lastUser(c).text}”`,
+      text: summaryText(
+        c,
+        zh
+          ? `**之前的对话摘要（自动压缩）**：共 ${c.entries.length} 条记录。用户和助手讨论了这台主机的状态；用户最新的请求是：“${lastUser(c).text}”`
+          : `**Summary of the earlier conversation (compacted automatically)**: ${c.entries.length} entries. The user and the assistant went over this host’s state; the user’s latest request is: “${lastUser(c).text}”`,
+      ),
     };
     c.view = { ...c.view, context_start: entry.entry_id, updated_at: Date.now() };
     store(c, entry);
@@ -776,12 +784,15 @@ export function createAiMock(deps: AiMockDeps): AiApi {
    * `null`; `cameFrom` names the other, `null` without a move), a
    * `terminal_change` note when the message has the terminal tools and `terminalBefore` says there was
    * none, or the other way round, and a `model_change` note when the newest reply came from another
-   * model, unless a message without a reply noted that switch already. Returned as the text that goes
-   * before the message.
+   * model, unless a message without a reply noted that switch already, then the screen (`screenNote`), also
+   * before a conversation's first message. Returned as the text that goes before the message.
    */
   async function notesBefore(c: Conv, earlier: AiEntryView[], move: Move | null, cameFrom: string | null, context: AiTurnContext): Promise<string> {
     const notes: Note[] = [];
-    if (earlier.length === 0) return "";
+    const screen = await screenNote(c, move, context);
+    // Like Rust (AI-16): the mode, when it is not the one the model was last told of.
+    const permission: Note[] = notedPermission(earlier) === context.permission_mode ? [] : [{ kind: "permission_mode", mode: context.permission_mode }];
+    if (earlier.length === 0) return permission.map((n) => `${noteBlock(n)}\n\n`).join("") + screen;
     for (const e of [...earlier].reverse()) {
       if (e.role === "assistant") {
         if (interrupted.has(e.entry_id)) notes.push({ kind: "interrupted" });
@@ -807,8 +818,21 @@ export function createAiMock(deps: AiMockDeps): AiApi {
       }
       if (e.role === "user" && parseMessage(e.text).notes.some((n) => n.kind === "model_change" && n.to === now)) break;
     }
-    notes.push(...pendingReverts(c.view.id, earlier));
-    return notes.map((n) => `${noteBlock(n)}\n\n`).join("");
+    notes.push(...permission, ...pendingReverts(c.view.id, earlier));
+    return notes.map((n) => `${noteBlock(n)}\n\n`).join("") + screen;
+  }
+
+  /**
+   * Like Rust's `screen_note` (AI-46): the `terminal_state` note of a message the panel sent with the screen
+   * of a connected tab, while **Send Terminal Screen** is on, on the host the conversation is on with `move`.
+   */
+  async function screenNote(c: Conv, move: Move | null, context: AiTurnContext): Promise<string> {
+    if (!context.tab || !context.screen) return "";
+    const hosts = (await deps.hosts?.()) ?? [];
+    const place = move ?? c.view;
+    const host = hosts.find((h) => h.id === place.host_id)?.name ?? (place.quick_target ? formatTarget(place.quick_target) : "");
+    const note = screenStateNote(host, context.screen);
+    return note ? `${noteBlock(note)}\n\n` : "";
   }
 
   /**
@@ -1461,7 +1485,7 @@ export function createAiMock(deps: AiMockDeps): AiApi {
       convs.set(c.view.id, c);
       const earlier = [...c.entries];
       const move = await moveOf(c, input.context);
-      const notes = (input.conversation_id ? await notesBefore(c, earlier, move, move?.from ?? null, input.context) : "") + (await deferredList(input.context, input.text));
+      const notes = (await notesBefore(c, earlier, move, move?.from ?? null, input.context)) + (await deferredList(input.context, input.text));
       const recorded = input.conversation_id ? placeOf(c.view) : { host_id: null, quick_target: null, origin: null };
       const user_entry = await storeMessage(c, turn, notes + input.text, input.context, move, recorded);
       return { conversation: view(c), user_entry };
@@ -1587,9 +1611,12 @@ export function createAiMock(deps: AiMockDeps): AiApi {
         role: "summary",
         entry_id: newId(),
         created_at: Date.now(),
-        text: zh
-          ? `**之前的对话摘要**：共 ${c.entries.length} 条记录。用户和助手讨论了这台主机的状态，并完成了相关检查。`
-          : `**Summary of the earlier conversation**: ${c.entries.length} entries. The user and the assistant went over this host’s state and finished the checks.`,
+        text: summaryText(
+          c,
+          zh
+            ? `**之前的对话摘要**：共 ${c.entries.length} 条记录。用户和助手讨论了这台主机的状态，并完成了相关检查。`
+            : `**Summary of the earlier conversation**: ${c.entries.length} entries. The user and the assistant went over this host’s state and finished the checks.`,
+        ),
       };
       c.entries.push(entry);
       c.view = { ...c.view, context_start: entry.entry_id, updated_at: Date.now() };
@@ -1645,7 +1672,14 @@ export function createAiMock(deps: AiMockDeps): AiApi {
       await delay(200);
       const q = query.trim().toLowerCase();
       if (!q) return [];
-      const textOf = (e: AiEntryView) => (e.role === "user" || e.role === "assistant" || e.role === "summary" ? e.text : "");
+      // Like Rust, without the screen a message showed (AI-46), whose text is the host's, or the
+      // permission mode note (§13.5).
+      const withoutNotes = (text: string) =>
+        parseMessage(text)
+          .notes.filter((n) => n.kind === "terminal_state" || n.kind === "permission_mode")
+          .reduce((t, n) => t.replace(`${noteBlock(n)}\n\n`, ""), text);
+      const textOf = (e: AiEntryView) =>
+        e.role === "user" ? withoutNotes(e.text) : e.role === "summary" ? splitPermissionNote(e.text).summary : e.role === "assistant" ? e.text : "";
       const hits: AiSearchHit[] = [];
       for (const c of [...convs.values()].sort((a, b) => view(b).last_activity - view(a).last_activity)) {
         const entry = c.entries.find((e) => textOf(e).toLowerCase().includes(q));
