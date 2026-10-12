@@ -50,8 +50,8 @@ fn idle_time(state: &AppState) -> Duration {
 fn idle_lock_due(state: &AppState, idle: Duration) -> bool {
     let minutes = state.lock_policy.auto_lock_minutes.load(Ordering::Relaxed);
     minutes != 0
-        && (state.vault().is_unlocked() || state.lifecycle.try_lock().is_err())
         && idle >= Duration::from_secs(u64::from(minutes) * 60)
+        && (state.vault().is_unlocked() || state.lifecycle.try_lock().is_err())
 }
 
 fn disconnects_on_lock(state: &AppState) -> bool {
@@ -215,6 +215,27 @@ mod tests {
         assert_ne!(generation, state.vault().lock_generation());
         drop(operation);
         assert!(!idle_lock_due(&state, IDLE));
+    }
+
+    #[test]
+    fn idle_below_the_timeout_does_not_wait_for_the_vault() {
+        let state = std::sync::Arc::new(unlocked());
+        state
+            .vault()
+            .set_local_prefs(r#"{"auto_lock_minutes":1}"#)
+            .unwrap();
+        refresh_policy(&state);
+        let vault = state.vault();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            send.send(idle_lock_due(&worker_state, Duration::from_secs(30)))
+                .unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(2));
+        drop(vault);
+        worker.join().unwrap();
+        assert_eq!(result, Ok(false));
     }
 
     #[test]
