@@ -170,7 +170,7 @@ export const commands = {
 	syncSetAuto: (enabled: boolean) => __TAURI_INVOKE<void>("sync_set_auto", { enabled }),
 	/**
 	 *  Stops syncing on this device. Local data and the remote copy are both kept.
-	 *
+	 * 
 	 *  The connection ends first, and its running round stops before the saved settings are
 	 *  cleared, so no round writes sync state after this returns or into a connection set up later
 	 *  (spec §6.3). Each setting is cleared even if clearing another fails, so a failed credential
@@ -210,7 +210,7 @@ export const commands = {
 	/**
 	 *  The master password step when step 2 found the Worker already holding a vault: Flow C (§6.6)
 	 *  against that Worker's workers.dev URL, then ends the deployment, which deployed nothing.
-	 *
+	 * 
 	 *  The sync settings record no deployment: the app did not deploy this Worker, so an update
 	 *  treats it like one deployed by hand (a Git integration may redeploy it).
 	 */
@@ -434,11 +434,11 @@ export type AiAllowance = {
 };
 
 /**  What an AI approval saved on this device lets run without asking (AI-19). */
-export type AiAllowanceKind =
+export type AiAllowanceKind = 
 /**  `run_command` calls whose command starts with `value`, on one host. */
-"command" |
+"command" | 
 /**  Every call of the tool `value` (`edit_file`, `write_file` or `send_input`), on one host. */
-"tool" |
+"tool" | 
 /**  `fetch_url` calls of pages on the host name `value`, on any tab. */
 "domain";
 
@@ -506,16 +506,16 @@ export type AiFileChange = {
 };
 
 /**  Where a file tool call's change stands on this device (AI-41). */
-export type AiFileChangeState =
+export type AiFileChangeState = 
 /**  The call wrote the file. */
-"written" |
+"written" | 
 /**
  *  The write failed after it may have begun, or its end was never recorded: the file may be
  *  cut short. It can be reverted like a written one.
  */
-"unfinished" |
+"unfinished" | 
 /**  The user reverted the change. */
-"reverted" |
+"reverted" | 
 /**
  *  The 32 MB limit dropped what the file held before, so the change can no longer be
  *  reverted.
@@ -543,26 +543,26 @@ export type AiFilePreview = {
 };
 
 /**  The outcome of a revert (AI-41). */
-export type AiFileRevert =
+export type AiFileRevert = 
 /**
  *  The file holds what it held before the call again, or no longer exists when the call
  *  created it. `wrote`: the revert wrote or deleted it; otherwise it was so already, as after
  *  a revert whose result was lost.
  */
-{ status: "reverted"; wrote: boolean } |
+{ status: "reverted"; wrote: boolean } | 
 /**
  *  The file holds neither what the call wrote nor what it held before, so nothing was
  *  written: the diff from `current` to `before` is what Restore anyway would do. The texts
  *  show CRLF line breaks as `\n`.
  */
-{ status: "changed"; path: string;
+{ status: "changed"; path: string; 
 /**  What the file holds now; `None` when it does not exist. */
-current: string | null;
+current: string | null; 
 /**
  *  What it held before the call; `None` when the call created it, so Restore anyway
  *  deletes it.
  */
-before: string | null;
+before: string | null; 
 /**
  *  A later call of this conversation wrote the file too, so reverting the later changes
  *  first, newest first, may bring it back to what this call wrote.
@@ -621,30 +621,30 @@ export type AiProviderView = {
 };
 
 /**  Why a revert did not happen (AI-41), for the panel to say in the user's language. */
-export type AiRevertFailure =
+export type AiRevertFailure = 
 /**  The conversation's tab is not connected. */
-"disconnected" |
+"disconnected" | 
 /**  The tab is connected to another server than the one the call wrote on; `detail` names it. */
-"other_server" |
+"other_server" | 
 /**  The user the tab is logged in as cannot write or delete the file. */
-"permission_denied" |
+"permission_denied" | 
 /**
  *  The file changed since the call wrote it into something that is not a text file Hatoba
  *  can read (a directory, a binary file, a file over 1 MB): there is no diff to show.
  */
-"not_text" |
+"not_text" | 
 /**
  *  A symbolic link is in the place of the file the call created, so neither the link nor its
  *  target was deleted.
  */
-"symbolic_link" |
+"symbolic_link" | 
 /**  Reading the file did not finish within 30 seconds; nothing was written. */
-"timed_out" |
+"timed_out" | 
 /**
  *  Writing or deleting failed after it may have begun, a timeout included: the file may be
  *  cut short, or deleted. `detail` says why, when there was an error.
  */
-"unfinished" |
+"unfinished" | 
 /**  Anything else; `detail` says what. */
 "failed";
 
@@ -700,7 +700,7 @@ export type AiSideAnswer = {
 };
 
 /**  Streamed on the channel of `ai_side_question` while the answer comes (AI-42). */
-export type AiSideEvent = { kind: "reasoning"; delta: string } | { kind: "text"; delta: string } |
+export type AiSideEvent = { kind: "reasoning"; delta: string } | { kind: "text"; delta: string } | 
 /**
  *  The answer called tools, so it was dropped and the question went again without tools:
  *  what streamed before is discarded.
@@ -789,22 +789,22 @@ export type AiTurnContext = {
 	disabled_mcp_servers: string[],
 };
 
-export type AiTurnEndReason = "completed" | "length" | "refused" |
+export type AiTurnEndReason = "completed" | "length" | "refused" | 
 /**  The response had neither text nor tool calls, such as a reply of reasoning only (§13.1). */
 "empty" | "stopped" | "error";
 
 /**  Streamed on the channel of `ai_send` / `ai_retry` for the whole turn (§13.1). */
-export type AiTurnEvent =
+export type AiTurnEvent = 
 /**
  *  The turn of a new conversation is registered under this id, which the conversation is
  *  stored under with its message. Sent before the message waits for the MCP servers (AI-45),
  *  so a stop can name the turn before `ai_send` returns.
  */
-{ kind: "opened"; conversation_id: string } | { kind: "request_started" } | { kind: "text"; delta: string } | { kind: "reasoning"; delta: string } | { kind: "tool_call"; id: string; name: string; arguments: string } | { kind: "usage"; input_tokens: number; output_tokens: number; estimated: boolean } |
+{ kind: "opened"; conversation_id: string } | { kind: "request_started" } | { kind: "text"; delta: string } | { kind: "reasoning"; delta: string } | { kind: "tool_call"; id: string; name: string; arguments: string } | { kind: "usage"; input_tokens: number; output_tokens: number; estimated: boolean } | 
 /**  An entry was stored: the assistant response, a tool result, or a cancelled result. */
-{ kind: "entry"; entry: AiEntryView } |
+{ kind: "entry"; entry: AiEntryView } | 
 /**  One response finished. With `tool_calls`, Rust waits for every call's result. */
-{ kind: "done"; finish: AiFinish } | { kind: "error"; status: number | null; message: string } |
+{ kind: "done"; finish: AiFinish } | { kind: "error"; status: number | null; message: string } | 
 /**
  *  The provider refused the thinking level, so the request was sent again without it and the
  *  model answers at its default depth (AI-05).
@@ -941,9 +941,9 @@ export type D1Database = {
 
 export type Density = "regular" | "compact";
 
-export type DeployDatabaseAction = "create" |
+export type DeployDatabaseAction = "create" | 
 /**  An existing database with nothing but Hatoba's migrations. */
-"use" |
+"use" | 
 /**  The database already bound to the Hatoba Worker. */
 "bound";
 
@@ -997,9 +997,9 @@ export type DeployTarget = {
 	subdomain: string | null,
 };
 
-export type DeployWorkerAction = "create" | "update" |
+export type DeployWorkerAction = "create" | "update" | 
 /**  A Hatoba Worker whose database holds a vault: the deployment stops. */
-"has_vault" |
+"has_vault" | 
 /**  A Worker the app does not recognize: the deployment stops. */
 "foreign";
 
@@ -1019,38 +1019,38 @@ export type DeviceView = {
 export type DroppedFile = { status: "ok"; name: string; text: string } | { status: "refused"; name: string; reason: DroppedFileRefusal };
 
 /**  Why a file dropped on the AI panel is not attached (AI-35): the panel's own reasons. */
-export type DroppedFileRefusal =
+export type DroppedFileRefusal = 
 /**  An image, which attachments do not take yet. */
-"image" |
+"image" | 
 /**  Over 256 KB. */
-"too_large" |
+"too_large" | 
 /**  NUL bytes or invalid UTF-8. */
-"binary" |
+"binary" | 
 /**  Not a file, gone, or not readable. */
 "unreadable";
 
-export type ErrorCode = "locked" | "not_initialized" | "already_initialized" | "wrong_password" | "wrong_recovery_code" | "throttled" | "not_found" | "invalid_input" | "key_parse" | "ssh" | "sftp" | "sync" | "sync_auth" | "sync_offline" | "remote_initialized" | "remote_not_initialized" |
+export type ErrorCode = "locked" | "not_initialized" | "already_initialized" | "wrong_password" | "wrong_recovery_code" | "throttled" | "not_found" | "invalid_input" | "key_parse" | "ssh" | "sftp" | "sync" | "sync_auth" | "sync_offline" | "remote_initialized" | "remote_not_initialized" | 
 /**  Another sync setup (flow A or C, §6.6) is still running. */
-"sync_setup_busy" |
+"sync_setup_busy" | 
 /**  Sync is already set up on this device, so it cannot join a cloud vault (flow C). */
-"sync_already_configured" |
+"sync_already_configured" | 
 /**  In-app deployment (§6.7): Cloudflare rejected the API token. */
-"cloudflare_token" |
+"cloudflare_token" | 
 /**  The API token lacks the permission in `permission`. */
-"cloudflare_permission" |
+"cloudflare_permission" | 
 /**  Any other Cloudflare API failure; `cf_code` has Cloudflare's code when it sent one. */
-"cloudflare" | "subdomain_required" | "subdomain_unavailable" | "worker_name_taken" |
+"cloudflare" | "subdomain_required" | "subdomain_unavailable" | "worker_name_taken" | 
 /**  An upgrade found no Hatoba Worker with a vault under the name. */
-"worker_not_found" |
+"worker_not_found" | 
 /**  An upgrade found a Worker newer than the one this build deploys. */
-"worker_newer" |
+"worker_newer" | 
 /**  This build does not embed the Worker, so it cannot deploy it. */
-"no_worker_bundle" |
+"no_worker_bundle" | 
 /**
  *  AI assistant (§13): a model provider or search provider failed. `http_status` has the
  *  status it answered with, when it answered; `detail` is its own message.
  */
-"ai" |
+"ai" | 
 /**  A downloaded update does not carry a valid signature from the release key (spec §11). */
 "update_signature" | "cancelled" | "io" | "internal";
 
@@ -1429,11 +1429,11 @@ export type ProxyInput = {
 export type ProxyKind = "socks5" | "http";
 
 /**  Which proxy a host's connection goes through (SSH-13). */
-export type ProxyMode =
+export type ProxyMode = 
 /**  This device's default proxy, if it has one. */
-"device_default" |
+"device_default" | 
 /**  No proxy. */
-"direct" |
+"direct" | 
 /**  The saved proxy in `proxy_id`. */
 "proxy";
 
@@ -1580,7 +1580,7 @@ export type SkillInput = {
 };
 
 /**  Why a skill cannot be imported or saved (AI-27). */
-export type SkillIssue = { kind: "missing_skill_md" } | { kind: "invalid_frontmatter"; detail: string } | { kind: "invalid_name"; name: string } | { kind: "missing_description" } | { kind: "description_too_long"; chars: number } | { kind: "file_too_large"; path: string; size: number } | { kind: "unsafe_path"; path: string } | { kind: "too_many_files"; count: number } |
+export type SkillIssue = { kind: "missing_skill_md" } | { kind: "invalid_frontmatter"; detail: string } | { kind: "invalid_name"; name: string } | { kind: "missing_description" } | { kind: "description_too_long"; chars: number } | { kind: "file_too_large"; path: string; size: number } | { kind: "unsafe_path"; path: string } | { kind: "too_many_files"; count: number } | 
 /**  More than 5 MB in total. */
 { kind: "too_large"; bytes: number };
 
@@ -1612,13 +1612,13 @@ export type SshConfigCandidate = {
 	exists: boolean,
 };
 
-export type SshErrorKind = "dns" | "refused" | "timeout" | "unreachable" | "auth_failed" | "host_key_rejected" | "key_parse" | "disconnected" | "protocol" | "io" | "channel" | "sftp" | "cancelled" |
+export type SshErrorKind = "dns" | "refused" | "timeout" | "unreachable" | "auth_failed" | "host_key_rejected" | "key_parse" | "disconnected" | "protocol" | "io" | "channel" | "sftp" | "cancelled" | 
 /**  SSH-13: the proxy could not be reached. */
-"proxy_unreachable" |
+"proxy_unreachable" | 
 /**  SSH-13: the proxy wants a username and password, or did not accept them. */
-"proxy_auth" |
+"proxy_auth" | 
 /**  SSH-13: the proxy did not open the connection to the server. */
-"proxy" |
+"proxy" | 
 /**  SSH-13: the host or the device default names a proxy that was deleted. */
 "proxy_missing" | "other";
 
@@ -1631,14 +1631,14 @@ export type StarPrompt = {
 };
 
 /**  Streamed on the channel of `ssh_stats_start` (TERM-12). */
-export type StatsEvent =
+export type StatsEvent = 
 /**  A reading, one per interval. */
-{ kind: "stats"; stats: ServerStatsView } |
+{ kind: "stats"; stats: ServerStatsView } | 
 /**
  *  The server does not run Linux; the last event. `system` is its name, such as `FreeBSD`,
  *  or empty when unknown.
  */
-{ kind: "unsupported"; system: string } |
+{ kind: "unsupported"; system: string } | 
 /**  Sampling stopped on its own (the script failed or the connection ended); the last event. */
 { kind: "ended"; error: AppError };
 
@@ -1652,7 +1652,7 @@ export type SyncCounts = {
 
 export type SyncKind = "none" | "worker" | "d1";
 
-export type SyncState = "off" | "idle" | "syncing" | "offline" | "auth_failed" | "error" |
+export type SyncState = "off" | "idle" | "syncing" | "offline" | "auth_failed" | "error" | 
 /**  The Worker's version stops sync until it or the app is updated; `worker_update` says which. */
 "paused";
 
@@ -1763,9 +1763,9 @@ export type UpdateCheck = {
 };
 
 /**  Sent on the `update_install` channel. */
-export type UpdateProgress =
+export type UpdateProgress = 
 /**  Bytes downloaded so far, and the installer's size when the server sent it. */
-{ kind: "downloading"; downloaded: number; total: number | null } |
+{ kind: "downloading"; downloaded: number; total: number | null } | 
 /**  The download passed the signature check. Hatoba closes, and the installer starts it again. */
 { kind: "installing" };
 
@@ -1807,13 +1807,13 @@ export type UpgradeTarget = {
 	worker_name: string,
 };
 
-export type UpgradeWorkerAction = "upgrade" |
+export type UpgradeWorkerAction = "upgrade" | 
 /**  No Worker has the name: the upgrade stops. */
-"missing" |
+"missing" | 
 /**  A Worker the app does not recognize: the upgrade stops. */
-"foreign" |
+"foreign" | 
 /**  A Hatoba Worker without a vault: the upgrade stops. */
-"no_vault" |
+"no_vault" | 
 /**  The Worker is newer than the bundled version: the upgrade stops. */
 "newer";
 
@@ -1849,11 +1849,11 @@ export type WorkerUpdate = {
 	bundled: string | null,
 };
 
-export type WorkerUpdateKind =
+export type WorkerUpdateKind = 
 /**  Older than the bundled version: sync continues, and the update can be dismissed. */
-"available" |
+"available" | 
 /**  Older than the minimum version, or a lower `api`: sync is paused. */
-"required" |
+"required" | 
 /**  A newer `api` than this app speaks: sync is paused until Hatoba is updated. */
 "app_required";
 
