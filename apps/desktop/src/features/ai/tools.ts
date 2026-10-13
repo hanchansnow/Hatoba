@@ -12,6 +12,8 @@ export const SEND_INPUT = "send_input";
 export const READ_FILE = "read_file";
 export const EDIT_FILE = "edit_file";
 export const WRITE_FILE = "write_file";
+export const GREP = "grep";
+export const GLOB = "glob";
 export const WEB_SEARCH = "web_search";
 export const FETCH_URL = "fetch_url";
 export const READ_SKILL = "read_skill";
@@ -25,6 +27,8 @@ export type ToolKind =
   | "read_file"
   | "edit_file"
   | "write_file"
+  | "grep"
+  | "glob"
   | "web_search"
   | "fetch_url"
   | "read_skill"
@@ -32,7 +36,7 @@ export type ToolKind =
   | "mcp"
   | "unknown";
 
-const BUILTIN: readonly string[] = [READ_TERMINAL, RUN_COMMAND, SEND_INPUT, READ_FILE, EDIT_FILE, WRITE_FILE, WEB_SEARCH, FETCH_URL, READ_SKILL, SEARCH_TOOLS];
+const BUILTIN: readonly string[] = [READ_TERMINAL, RUN_COMMAND, SEND_INPUT, READ_FILE, EDIT_FILE, WRITE_FILE, GREP, GLOB, WEB_SEARCH, FETCH_URL, READ_SKILL, SEARCH_TOOLS];
 
 /** A call's kind; a `call_mcp_tool` call (AI-45) is an MCP call, approved as the tool it names. */
 export function toolKind(name: string): ToolKind {
@@ -83,27 +87,40 @@ export function isFileTool(kind: ToolKind): kind is "read_file" | "edit_file" | 
   return kind === "read_file" || kind === "edit_file" || kind === "write_file";
 }
 
+/** The search tools (AI-48, AI-49), which run `find` and `grep` in Rust over an exec channel of the tab's connection. */
+export function isSearchTool(kind: ToolKind): kind is "grep" | "glob" {
+  return kind === "grep" || kind === "glob";
+}
+
 /** Tools that act on the tab's SSH session and return an error while it is disconnected (AI-08). */
 export function needsSession(kind: ToolKind): boolean {
-  return kind === "read_terminal" || kind === "send_input" || kind === "run_command" || isFileTool(kind);
+  return kind === "read_terminal" || kind === "send_input" || kind === "run_command" || isFileTool(kind) || isSearchTool(kind);
 }
 
 /**
- * §13.5: in manual approval mode `read_terminal`, `read_file`, `web_search`, `read_skill` and `search_tools`
- * (AI-45) run without asking and everything else waits for the user; bypass runs everything. Unknown tools
- * never run, so never ask.
+ * §13.5: in manual approval mode `read_terminal`, `read_file`, `grep`, `glob`, `web_search`, `read_skill` and
+ * `search_tools` (AI-45) run without asking and everything else waits for the user; bypass runs everything.
+ * Auto asks about the same calls as manual approval, and its judge decides which of them can skip the card
+ * (AI-47). Unknown tools never run, so never ask.
  */
 export function needsApproval(kind: ToolKind, mode: AiPermissionMode): boolean {
   if (mode === "bypass") return false;
   return kind === "run_command" || kind === "send_input" || kind === "edit_file" || kind === "write_file" || kind === "fetch_url" || kind === "mcp";
 }
 
+/** The permission modes' icons (AI-16, AI-47): on the mode switch, in its menu, and on their notes' dividers. */
+export const MODE_ICON: Record<AiPermissionMode, string> = { manual: "shield-check", auto: "robot", bypass: "lightning" };
+
+/** §13.5, AI-47: the modes from the strictest: manual approval, Auto, bypass. */
+const STRICTNESS: readonly AiPermissionMode[] = ["manual", "auto", "bypass"];
+
 /**
- * §13.5: the mode a call of a turn runs in. The turn's requests named the mode it `started` in, so a
- * switch to bypass waits for the next turn, while a switch to manual approval applies at once.
+ * §13.5: the mode a call of a turn runs in, the stricter of the two. The turn's requests named the mode it
+ * `started` in, so a switch to a less strict mode waits for the next message, while a switch to a stricter
+ * one applies to the turn's next call.
  */
 export function callMode(started: AiPermissionMode, now: AiPermissionMode): AiPermissionMode {
-  return started === "manual" || now === "manual" ? "manual" : "bypass";
+  return STRICTNESS[Math.min(STRICTNESS.indexOf(started), STRICTNESS.indexOf(now))] ?? "manual";
 }
 
 /** What decides whether a call waits for the user. */
@@ -118,9 +135,11 @@ export interface AskInput {
 
 /**
  * §13.5 with AI-19 and AI-31. An approval the user chose wins, also over an MCP server's Always ask,
- * since the user chose it on a card of this very tool. An MCP tool asks in manual mode unless it is set
- * to Always allow on this device, and in bypass mode only when its server is set to Always ask. An MCP
- * call whose tool `mcp_tool_info` cannot name asks in both modes: nothing says which server it would reach.
+ * since the user chose it on a card of this very tool. An MCP tool asks in manual mode and in Auto unless
+ * it is set to Always allow on this device, and in bypass mode only when its server is set to Always ask.
+ * An MCP call whose tool `mcp_tool_info` cannot name asks in every mode: nothing says which server it would
+ * reach. In Auto, a call this asks about goes to the judge first, unless a hard rule sends it straight to
+ * the card (AI-47, `hardRule`).
  */
 export function mustAsk({ kind, mode, allowed, mcp }: AskInput): boolean {
   if (allowed) return false;
@@ -284,6 +303,8 @@ const TOOL_LABEL: Record<Exclude<ToolKind, "mcp" | "unknown">, MessageKey> = {
   read_file: "ai.tool.read_file",
   edit_file: "ai.tool.edit_file",
   write_file: "ai.tool.write_file",
+  grep: "ai.tool.grep",
+  glob: "ai.tool.glob",
   web_search: "ai.tool.web_search",
   fetch_url: "ai.tool.fetch_url",
   read_skill: "ai.tool.read_skill",
@@ -343,19 +364,19 @@ function intArg(v: unknown, fallback: number, min: number, max: number): number 
   return Math.min(max, Math.max(min, Math.floor(n)));
 }
 
-export const READ_TERMINAL_DEFAULT_LINES = 100;
 export const READ_TERMINAL_MAX_LINES = 1000;
 
 export interface ReadTerminalArgs {
-  /** Scrollback lines above the visible screen. */
-  lines: number;
+  /** Lines to read, counted back from the last line with text; null when the call leaves it to the default. */
+  lines: number | null;
 }
 
-/** AI-11: `{ lines?: integer }`, 100 by default and at most 1,000. */
+/** AI-11: `{ lines?: integer }`, at most 1,000. */
 export function parseReadTerminal(json: string): Parsed<ReadTerminalArgs> {
   const args = parseArgs(json);
   if (!args) return { ok: false, error: "The arguments are not a JSON object." };
-  const lines = intArg(args.lines, READ_TERMINAL_DEFAULT_LINES, 0, READ_TERMINAL_MAX_LINES);
+  if (args.lines === undefined || args.lines === null || args.lines === "") return { ok: true, value: { lines: null } };
+  const lines = intArg(args.lines, 1, 1, READ_TERMINAL_MAX_LINES);
   if (lines === null) return { ok: false, error: '"lines" must be an integer.' };
   return { ok: true, value: { lines } };
 }
@@ -440,6 +461,10 @@ export function callSummary(name: string, json: string): string {
     case "edit_file":
     case "write_file":
       return firstLine(str(args.path));
+    case "grep":
+      return [str(args.pattern), str(args.path), str(args.glob)].filter(Boolean).join(" · ");
+    case "glob":
+      return [str(args.pattern), str(args.path)].filter(Boolean).join(" · ");
     case "read_terminal":
       return args.lines !== undefined ? str(args.lines) : "";
     default: {

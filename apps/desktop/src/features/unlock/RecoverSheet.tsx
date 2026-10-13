@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { enterUnlocked } from "@/app/boot";
 import { errorMessage } from "@/app/errors";
 import { Button, TextField } from "@/components/controls";
-import { FooterSpacer, Sheet, SheetHeader } from "@/components/overlay";
+import { FooterSpacer, Sheet, SheetHeader, toast } from "@/components/overlay";
 import { NewPasswordFields, useNewPassword } from "@/features/onboarding/PasswordStrength";
 import { useT } from "@/i18n";
 import { api, toAppError } from "@/ipc/api";
@@ -34,13 +34,22 @@ export function RecoverSheet({ onClose }: { onClose: () => void }) {
     setError(null);
     try {
       await api.vault_recover(code, pw.password);
-      pw.setPassword("");
-      pw.setConfirm("");
-      await enterUnlocked();
     } catch (err) {
       if (toAppError(err).code === "wrong_recovery_code") setCodeError(errorMessage(t, err));
       else setError(errorMessage(t, err));
       setBusy(false);
+      return;
+    }
+    // Recovery has committed; a later lock or data-load error cannot turn it into a failure.
+    pw.setPassword("");
+    pw.setConfirm("");
+    try {
+      await enterUnlocked();
+    } catch (err) {
+      toast(errorMessage(t, err), "error");
+    } finally {
+      setBusy(false);
+      onClose();
     }
   };
 

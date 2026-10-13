@@ -44,7 +44,7 @@ This page tracks implementation progress, items awaiting verification, and follo
 
 | ID | Name | Status | Notes |
 |---|---|---|---|
-| VAULT-01…07 | Master password, recovery code, unlock, password change, encrypted backup | ✅ | |
+| VAULT-01…07 | Master password, recovery code, unlock, password change, encrypted backup | ✅ | Caller regressions cover unlock and recovery completion that stays locked, relocking during data/status loading, committed recovery followed by a loading failure, and retry after a rejected recovery |
 | VAULT-08 | Plaintext export | ⬜ | P2 |
 | HOST-01…10 | Host management, search, online probing | ✅ | |
 | HOST-11 | Server OS icon | ✅ | |
@@ -122,8 +122,10 @@ A contributor tried these by hand on an Apple Silicon Mac; the maintainer has no
 | AI-42 | Side questions that leave a running turn alone | 🟡 | The panel was tried with the mock backend. Not yet tried against the real providers |
 | AI-11…15 | Tools: `read_terminal`, `run_command`, `send_input`, `web_search`, `fetch_url` | 🟡 | `web_search` not yet tried against Brave, Tavily, or SearXNG |
 | AI-38…40 | File tools: `read_file`, `edit_file`, `write_file`, with the diff on the approval card | 🟡 | The scripts run against the local `sh` on Linux and macOS and against OpenSSH in the integration tests, and the panel was tried with the mock backend. Not yet tried in the desktop app against a real server |
+| AI-48, 49 | Search tools: `grep`, `glob` | 🟡 | The scripts run against the local `sh`, `find` and `grep` on Linux and macOS and against OpenSSH in the integration tests, and the panel was tried with the mock backend. Not yet tried in the desktop app against a real server, or against BusyBox |
 | AI-41 | Revert a file tool's change | 🟡 | The delete script runs against the local `sh` on Linux and macOS and against OpenSSH in the integration tests, and the panel was tried with the mock backend. Not yet tried in the desktop app against a real server |
 | AI-16…18 | Manual approval and bypass modes, read-only commands without asking, approval card, Stop | ✅ | |
+| AI-47 | Auto mode: a judge (a System One endpoint or a model that chats) that lets safe or requested calls skip the approval card, its hard rules, the verdict on each call, **Test** in Settings | ✅ | Unit tests cover the System One requests and the chat-model adapter against mock servers, the rules, what the judge reads, and the panel's flow. Tried with Claude Haiku and TypeSafe's Jev preview as the judge: **Test** gave the expected decision on all 11 samples it had then. Not yet tried since the judged call carries what its built-in tool does and **Test** has 13 samples, nor with Cloudflare's Clef |
 | AI-19 | Allow commands by prefix, pages by domain, or a tool, for a conversation or saved on the device | ✅ | |
 | AI-20, 21 | Context meter, compaction | ✅ | |
 | AI-22 | Automatic compaction | ✅ | |

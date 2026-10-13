@@ -285,6 +285,7 @@ const TERMINAL_BODY = {
 
 const PERMISSION_BODY = {
   manual: "From this message on, the permission mode is manual approval.",
+  auto: "From this message on, the permission mode is auto.",
   bypass: "From this message on, the permission mode is bypass.",
 } as const satisfies Record<AiPermissionMode, string>;
 
@@ -400,7 +401,7 @@ function blockOf(tag: string, attrs: [string, string][], body: string): Block | 
     }
     case "permission_mode": {
       const mode = names === "mode" ? value(0) : "";
-      return mode === "manual" || mode === "bypass" ? { kind: "note", note: { kind: tag, mode } } : null;
+      return mode === "manual" || mode === "auto" || mode === "bypass" ? { kind: "note", note: { kind: tag, mode } } : null;
     }
     case "file_revert":
       return names === "path,tool_call_id" ? { kind: "note", note: { kind: tag, path: value(0), toolCallId: value(1), body } } : null;
@@ -477,11 +478,11 @@ export function parseMessage(text: string): MessageParts {
 }
 
 /**
- * A summary's text (AI-21) split into the `permission_mode` note Rust stores before the summary of a
- * conversation in bypass, which carries the mode past the compaction, and the summary itself.
+ * A summary's text (AI-21) split into the `permission_mode` note Rust stores before the summary, which
+ * carries the mode past the compaction, and the summary itself.
  */
 export function splitPermissionNote(text: string): { mode: AiPermissionMode | null; summary: string } {
-  for (const mode of ["manual", "bypass"] as const) {
+  for (const mode of ["manual", "auto", "bypass"] as const) {
     const note = `${noteBlock({ kind: "permission_mode", mode })}\n\n`;
     if (text.startsWith(note)) return { mode, summary: text.slice(note.length) };
   }
@@ -491,17 +492,17 @@ export function splitPermissionNote(text: string): { mode: AiPermissionMode | nu
 /**
  * AI-16: the permission mode the model was last told of, as Rust's `noted_permission` reads it from a
  * conversation's entries: the newest `permission_mode` note, or the one the newest summary starts
- * with. Before any note, and after a summary without one, it is manual approval.
+ * with. Null when it was told of none: before any note, and after a summary without one.
  */
-export function notedPermission(entries: readonly AiEntryView[]): AiPermissionMode {
+export function notedPermission(entries: readonly AiEntryView[]): AiPermissionMode | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
-    if (e.role === "summary") return splitPermissionNote(e.text).mode ?? "manual";
+    if (e.role === "summary") return splitPermissionNote(e.text).mode;
     if (e.role !== "user") continue;
     const note = parseMessage(e.text).notes.find((n) => n.kind === "permission_mode");
     if (note) return note.mode;
   }
-  return "manual";
+  return null;
 }
 
 /** A model as a `model_change` note names it (`Name (id)`), by its name alone, for the panel. */

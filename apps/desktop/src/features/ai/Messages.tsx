@@ -1,9 +1,10 @@
-import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useApp } from "@/app/store";
 import { Button, Icon, IconButton, LinkButton, Spinner } from "@/components/controls";
 import { PopupSelect, toast } from "@/components/overlay";
 import { readClipboard, writeClipboard } from "@/features/terminal/clipboard";
 import { formatDateTime, formatMessageTime, useT, useToday, type MessageKey } from "@/i18n";
-import type { AiEntryView, AiFileChange, AiFilePreview, AiFileRevert, AiToolCall, HostView, McpToolAnnotations, McpToolInfo } from "@/ipc/types";
+import type { AiAutoVerdict, AiEntryView, AiFileChange, AiFilePreview, AiFileRevert, AiToolCall, HostView, McpToolAnnotations, McpToolInfo } from "@/ipc/types";
 import { cx } from "@/lib/cx";
 import { isImeEvent } from "@/lib/ime";
 import {
@@ -21,6 +22,7 @@ import {
   type Decision,
 } from "./actions";
 import { AttachmentCardFor, AttachmentChipFor, ScreenCard } from "./AttachmentChips";
+import { answersText, askText, verdictText } from "./autoText";
 import { FileChange } from "./FileChange";
 import { useFilePreview } from "./filePreview";
 import { composeMessage, fitsMessage, isLongPaste, makePaste, parseMessage, splitPermissionNote, type MessageParts, type Note } from "./attachments";
@@ -38,6 +40,7 @@ import {
   callFileChange,
   callSummary,
   exitStatusOf,
+  MODE_ICON,
   parseArgs,
   prettyArgs,
   proxyArguments,
@@ -51,7 +54,7 @@ import {
   type SendKey,
   type ToolKind,
 } from "./tools";
-import { callRevealKey, editedFiles, revealKey, type CallState, type LiveResponse } from "./turn";
+import { callRevealKey, editedFiles, revealKey, type AutoAsk, type CallState, type LiveResponse } from "./turn";
 import s from "./Messages.module.css";
 
 type ToolEntry = Extract<AiEntryView, { role: "tool" }>;
@@ -63,6 +66,8 @@ const TOOL_ICON: Record<ToolKind, string> = {
   read_file: "file-text",
   edit_file: "note-pencil",
   write_file: "file-plus",
+  grep: "file-magnifying-glass",
+  glob: "files",
   web_search: "magnifying-glass",
   fetch_url: "globe",
   read_skill: "book-open",
@@ -86,7 +91,7 @@ export const KEY_LABEL: Record<SendKey, MessageKey> = {
 /** Where a call stands, from its stored result or the turn (§9: tool running, waiting for approval, …). */
 type CallView =
   | { kind: "result"; entry: ToolEntry }
-  | { kind: CallState; mcp?: McpToolInfo | null }
+  | { kind: CallState; mcp?: McpToolInfo | null; auto?: AutoAsk | null }
   | { kind: "queued" }
   | { kind: "streaming" }
   | { kind: "none" };
@@ -125,6 +130,7 @@ export function MessageList({ slotId, slot, host, empty }: { slotId: string; slo
     return null;
   }, [entries]);
   const replies = useMemo(() => findReplies(entries), [entries]);
+  const firstUser = entries.find((e) => e.role === "user")?.entry_id;
   // AI-41: the changes of file tool calls this device keeps, by response and call.
   const changes = useMemo(() => new Map(slot.fileChanges.map((c) => [`${c.response_id}:${c.tool_call_id}`, c])), [slot.fileChanges]);
 
@@ -162,7 +168,7 @@ export function MessageList({ slotId, slot, host, empty }: { slotId: string; slo
   const callView = (call: AiToolCall, newest: boolean): CallView => {
     const result = results.get(call.id);
     if (result) return { kind: "result", entry: result };
-    if (turn?.call?.id === call.id) return { kind: turn.call.state, mcp: turn.call.mcp };
+    if (turn?.call?.id === call.id) return { kind: turn.call.state, mcp: turn.call.mcp, auto: turn.call.auto };
     return newest && turn ? { kind: "queued" } : { kind: "none" };
   };
 
@@ -212,6 +218,7 @@ export function MessageList({ slotId, slot, host, empty }: { slotId: string; slo
                 text={entry.text}
                 at={entry.created_at}
                 pending={pending}
+                first={entry.entry_id === firstUser}
                 onResend={canEdit && !pending ? (text) => editAndResend(slotId, entry.entry_id, text) : undefined}
                 onFork={fork(entry.entry_id)}
                 untracked={() => editedFiles(entries, slot.fileChanges, entry.entry_id).untracked}
@@ -312,13 +319,15 @@ function ForkButton({ onFork }: { onFork: () => void }) {
  * replaces it and sends it again (AI-26), and with `onFork`, Fork from Here copies the conversation up
  * to it into a new one (AI-43). The notes Hatoba stored before it (AI-05, AI-09) are dividers above
  * it, not part of the bubble; an edit shows them while it is sent, and Rust works them out again for
- * the new message. `untracked` counts the file changes of the calls an edit deletes that this device
- * cannot revert (AI-41).
+ * the new message. The conversation's `first` message shows no permission mode divider: its note
+ * only tells the model the mode the conversation started in, which is no switch (AI-16).
+ * `untracked` counts the file changes of the calls an edit deletes that this device cannot revert (AI-41).
  */
 function UserMessage({
   text,
   at,
   pending,
+  first,
   onResend,
   onFork,
   untracked,
@@ -326,6 +335,7 @@ function UserMessage({
   text: string;
   at: number;
   pending: boolean;
+  first: boolean;
   onResend?: (text: string) => Promise<boolean>;
   onFork?: () => void;
   untracked: () => number;
@@ -334,7 +344,9 @@ function UserMessage({
   const [editing, setEditing] = useState(false);
   // AI-10, AI-35: what was attached to the message is in blocks at its start, after Hatoba's notes.
   const parts = useMemo(() => parseMessage(text), [text]);
-  const notes = parts.notes.filter((note) => note.kind !== "terminal_state").map((note, i) => <NoteDivider key={i} note={note} />);
+  const notes = parts.notes
+    .filter((note) => note.kind !== "terminal_state" && !(first && note.kind === "permission_mode"))
+    .map((note, i) => <NoteDivider key={i} note={note} />);
   // AI-46: the screen the message showed is a collapsed block above its attachments.
   const screen = parts.notes.find((note) => note.kind === "terminal_state");
   if (editing && onResend)
@@ -388,9 +400,7 @@ function NoteDivider({ note }: { note: Note }) {
         ? "plugs-connected"
         : "plugs"
       : note.kind === "permission_mode"
-        ? note.mode === "bypass"
-          ? "lightning"
-          : "shield-check"
+        ? MODE_ICON[note.mode]
         : NOTE_ICONS[note.kind];
   return (
     <div className={s.noteDivider} role="note" title={noteTitle(t, note)}>
@@ -679,6 +689,14 @@ function StatusChip({ view, name }: { view: CallView; name: string }) {
           {t("ai.call.running")}
         </span>
       );
+    case "judging":
+      // AI-47: Auto asks its judge whether the call can run without the card.
+      return (
+        <span className={s.chip} title={t("ai.call.judgingHint")}>
+          <Spinner size={11} />
+          {t("ai.call.judging")}
+        </span>
+      );
     case "approval":
       return <span className={cx(s.chip, s.chipWarn)}>{t("ai.call.approval")}</span>;
     case "queued":
@@ -747,28 +765,28 @@ function ToolBlock({
   const summary = callSummary(shown.name, shown.arguments);
   const revertible = change?.state === "written" || change?.state === "unfinished";
   const revert = useRevert(slotId, change);
+  const statusId = useId();
   useEffect(() => {
     if (flash) setOpen(true);
   }, [flash]);
 
-  if (view.kind === "approval") return <ApprovalCard slotId={slotId} call={call} host={host} mcp={view.mcp ?? null} />;
+  if (view.kind === "approval") return <ApprovalCard slotId={slotId} call={call} host={host} mcp={view.mcp ?? null} auto={view.auto ?? null} />;
+  // AI-47: the judge's verdict, when Auto decided the call.
+  const auto = view.kind === "result" ? view.entry.auto : null;
 
   return (
     <div className={cx(s.tool, flash && s.flash)} data-reveal={reveal}>
       <div className={s.toolHeadRow}>
-        <button type="button" className={s.toolHead} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <button type="button" className={s.toolHead} aria-expanded={open} aria-describedby={statusId} onClick={() => setOpen((v) => !v)}>
           <Icon name={TOOL_ICON[kind]} size={14} className={s.toolIcon} />
           <span className={s.toolName}>{toolLabel(t, shown.name)}</span>
           <span className={s.toolSummary}>{summary}</span>
-          {change?.state === "reverted" ? (
-            <span className={s.chip}>
-              <Icon name="arrow-counter-clockwise" size={11} />
-              {t("ai.revert.reverted")}
+          {auto?.decision === "run" && (
+            <span className={cx(s.chip, s.chipAuto)} title={answersText(t, auto.answers) || t("ai.auto.ran")}>
+              <Icon name={MODE_ICON.auto} size={11} />
+              {t("ai.call.auto")}
             </span>
-          ) : (
-            <StatusChip view={view} name={call.name} />
           )}
-          <Icon name={open ? "caret-down" : "caret-right"} size={11} className={s.toolCaret} />
         </button>
         {revertible && (
           <IconButton
@@ -784,9 +802,21 @@ function ToolBlock({
             }}
           />
         )}
+        <span id={statusId} className={s.toolStatus}>
+          {change?.state === "reverted" ? (
+            <span className={s.chip}>
+              <Icon name="arrow-counter-clockwise" size={11} />
+              {t("ai.revert.reverted")}
+            </span>
+          ) : (
+            <StatusChip view={view} name={call.name} />
+          )}
+        </span>
+        <Icon name={open ? "caret-down" : "caret-right"} size={11} className={s.toolCaret} />
       </div>
       {open && (
         <div className={s.toolBody}>
+          {auto && <AutoVerdict verdict={auto} />}
           {kind === "edit_file" || kind === "write_file" ? (
             <CallChange slotId={slotId} call={call} change={change} />
           ) : (
@@ -809,6 +839,47 @@ function ToolBlock({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * AI-47: in the block of a call Auto decided, what the judge decided: that Auto ran it without asking, or what
+ * concerned the judge (or why it could not judge) when the card asked, with the judge's answers.
+ */
+function AutoVerdict({ verdict }: { verdict: AiAutoVerdict }) {
+  const t = useT();
+  const answers = answersText(t, verdict.answers);
+  return (
+    <div className={s.autoVerdict}>
+      <div className={s.label}>{t("ai.mode.auto")}</div>
+      <div className={s.meta}>{verdict.decision === "run" ? t("ai.auto.ran") : verdictText(t, verdict)}</div>
+      {answers && <div className={s.meta}>{t("ai.auto.answers", { answers })}</div>}
+    </div>
+  );
+}
+
+/**
+ * AI-47: on the approval card of a call in Auto mode, why it asks: a hard rule, what concerned the judge (its
+ * answers on hover), or why the judge could not judge, with a way to Settings → AI when no judge is available.
+ */
+function AutoReason({ ask }: { ask: AutoAsk }) {
+  const t = useT();
+  const verdict = "verdict" in ask ? ask.verdict : null;
+  return (
+    <div className={s.autoReason} title={verdict ? answersText(t, verdict.answers) || undefined : undefined}>
+      <Icon name={MODE_ICON.auto} size={13} />
+      <span>
+        {askText(t, ask)}
+        {verdict?.failure === "unavailable" && (
+          <>
+            {" "}
+            <LinkButton className={s.inlineLink} onClick={() => useApp.getState().openSettings(true, "ai")}>
+              {t("ai.noProvider.open")}
+            </LinkButton>
+          </>
+        )}
+      </span>
     </div>
   );
 }
@@ -1098,9 +1169,10 @@ function allowLabels(t: ReturnType<typeof useT>, scope: Scope, tool: string, mcp
  * AI-17: the tool, the tab's host, and the full input, with Run, Edit and Reject. An MCP call (AI-31)
  * shows its server, the tool's description and hints in place of the host. Allow for this conversation
  * and Always allow (AI-19) name what they cover: a command's prefixes, a page's domain, or the tool. A
- * `call_mcp_tool` call (AI-45) shows, and edits, the tool it names and that tool's own arguments.
+ * `call_mcp_tool` call (AI-45) shows, and edits, the tool it names and that tool's own arguments. In Auto mode
+ * (AI-47), it says why it asks.
  */
-function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToolCall; host: HostInfo | null; mcp: McpToolInfo | null }) {
+function ApprovalCard({ slotId, call, host, mcp, auto }: { slotId: string; call: AiToolCall; host: HostInfo | null; mcp: McpToolInfo | null; auto: AutoAsk | null }) {
   const t = useT();
   const shown = useMemo(() => shownCall(call), [call]);
   const proxied = proxyCall(call.name, call.arguments) !== null;
@@ -1181,6 +1253,7 @@ function ApprovalCard({ slotId, call, host, mcp }: { slotId: string; call: AiToo
           </div>
         )
       )}
+      {auto && <AutoReason ask={auto} />}
       {mcp?.always_ask && bypass && <div className={s.meta}>{t("ai.approval.alwaysAsk")}</div>}
       {mcp && mode !== "edit" && <McpDetails mcp={mcp} />}
 

@@ -97,8 +97,9 @@ export function UnlockScreen() {
       setPassword("");
       await enterUnlocked();
     } catch (err) {
-      setBusy(false);
       await fail(err);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -109,8 +110,9 @@ export function UnlockScreen() {
       await api.vault_unlock_biometric();
       await enterUnlocked();
     } catch (err) {
-      setBusy(false);
       await fail(err);
+    } finally {
+      setBusy(false);
     }
   };
 
